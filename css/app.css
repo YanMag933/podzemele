@@ -163,6 +163,14 @@ article.hero-tile > button.hero-tile {
 .field textarea { min-height: 88px; resize: vertical; }
 .missing { outline: 2px solid var(--peril); }
 .photo-frame { width: min(220px, 60%); border-radius: 16px; border: 1px dashed var(--line); overflow: hidden; }
+.crop-stage { position: relative; touch-action: none; border-radius: 16px; overflow: hidden; background: #000; }
+.crop-stage img { width: 100%; display: block; }
+.crop-rect { position: absolute; border: 2px solid var(--gold); box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.55); }
+.crop-rect span { position: absolute; width: 28px; height: 28px; background: var(--gold); border-radius: 50%; }
+.crop-rect span[data-handle="nw"] { left: -14px; top: -14px; }
+.crop-rect span[data-handle="ne"] { right: -14px; top: -14px; }
+.crop-rect span[data-handle="sw"] { left: -14px; bottom: -14px; }
+.crop-rect span[data-handle="se"] { right: -14px; bottom: -14px; }
 .bar { height: 8px; background: #1a140f; border-radius: 99px; overflow: hidden; }
 .bar i { display: block; height: 100%; width: 0; background: var(--gold); }
 

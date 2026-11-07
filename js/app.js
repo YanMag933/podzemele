@@ -28,6 +28,8 @@ const state = {
   die: null,
   reward: null,
   counter: null,
+  crop: null,
+  originalSrc: "",
 };
 
 const app = document.getElementById("app");
@@ -53,6 +55,7 @@ function render(reset) {
   const y = reset ? 0 : (document.scrollingElement ? document.scrollingElement.scrollTop : 0);
   app.innerHTML = view() + toastHtml() + confirmHtml();
   if (document.scrollingElement) document.scrollingElement.scrollTop = y;
+  bindCropper();
 }
 
 function loadSettings() {
@@ -237,6 +240,17 @@ function findNum(text, label) {
   const m = a || b;
   return m ? Number(m[1]) : null;
 }
+function lineDigits(line) {
+  const compact = String(line || "").replace(/\s+/g, "");
+  if (/^\d{4}$/.test(compact)) return compact.split("").map(Number);
+  const groups = String(line || "").match(/\d+/g) || [];
+  if (groups.length === 4 && groups.every((g) => g.length <= 2)) return groups.map(Number);
+  if (groups.length === 1 && groups[0].length === 4) return groups[0].split("").map(Number);
+  return null;
+}
+function isLevelHeader(row) {
+  return !!row && row.join() === "1,2,3,4";
+}
 function parseHeroText(raw) {
   const text = String(raw || "").replace(/\r/g, "");
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -247,25 +261,24 @@ function parseHeroText(raw) {
   draft.boonLimit = findNum(flat, "преимущ") ?? findNum(flat, "boon");
   draft.treasureLimit = findNum(flat, "сокровищ") ?? findNum(flat, "treasure");
   const quads = [];
+  const plain = [];
   for (const line of lines) {
-    const nums = (line.match(/\d+/g) || []).map(Number);
-    if (nums.length < 4) continue;
+    const four = lineDigits(line);
+    if (!four) continue;
     const low = line.toLowerCase();
     let kind = null;
-    if (/ближ|melee/.test(low)) kind = "melee";
+    if (/ближ|melee|меч/.test(low)) kind = "melee";
     else if (/маги|magic/.test(low)) kind = "magic";
-    else if (/скор|speed|move/.test(low)) kind = "speed";
-    else if (/уров|level/.test(low)) kind = "level";
-    quads.push({ kind, four: nums.slice(-4) });
+    else if (/скор|speed|move|сапог/.test(low)) kind = "speed";
+    else if (/уров|level/.test(low) || isLevelHeader(four)) kind = "level";
+    quads.push({ kind, four });
+    if (kind !== "level") plain.push(four);
   }
   const byKind = {};
   quads.forEach((q) => { if (q.kind && q.kind !== "level") byKind[q.kind] = q.four; });
   let rows = null;
   if (byKind.melee && byKind.magic && byKind.speed) rows = [byKind.melee, byKind.magic, byKind.speed];
-  else {
-    rows = quads.filter((q) => q.kind !== "level").map((q) => q.four);
-    if (rows.length && rows[0].join() === "1,2,3,4") rows = rows.slice(1);
-  }
+  else if (plain.length >= 3) rows = plain.slice(0, 3);
   if (rows && rows.length >= 3) {
     for (let i = 0; i < 4; i++) draft.stats[i] = { melee: rows[0][i], magic: rows[1][i], speed: rows[2][i] };
   }
@@ -274,6 +287,41 @@ function parseHeroText(raw) {
   draft.name = words[0] || "";
   draft.race = words[1] && words[1].length <= 48 ? words[1] : "";
   draft.ability = words.slice(draft.race ? 2 : 1).join(" ").slice(0, 600);
+  return draft;
+}
+function firstLine(text) {
+  return String(text || "").split("\n").map((l) => l.trim()).find((l) => /[A-Za-zА-Яа-яЁё]{2,}/.test(l)) || "";
+}
+function smallNumber(text) {
+  const m = String(text || "").match(/\d{1,2}/);
+  if (!m) return null;
+  const n = Number(m[0]);
+  return n <= 30 ? n : null;
+}
+function applyRegions(draft, regions) {
+  const name = firstLine(regions.name);
+  const race = firstLine(regions.race);
+  if (name && name.length <= 40) draft.name = name;
+  if (race && race.length <= 48 && race !== draft.name) draft.race = race;
+  const ability = String(regions.ability || "").replace(/\s+/g, " ").trim();
+  if (ability.length > 12) draft.ability = ability.slice(0, 600);
+  const health = smallNumber(regions.health);
+  if (health != null && health >= 1) draft.health = health;
+  const boon = smallNumber(regions.boon);
+  const treasure = smallNumber(regions.treasure);
+  if (boon != null) draft.boonLimit = boon;
+  if (treasure != null) draft.treasureLimit = treasure;
+  const grid = regions.grid;
+  if (grid && grid.filter((row) => row && row.filter((n) => n != null).length === 4).length >= 2) {
+    const rows = grid.map((row) => row || [null, null, null, null]);
+    for (let i = 0; i < 4; i++) {
+      draft.stats[i] = {
+        melee: rows[0][i] != null ? rows[0][i] : draft.stats[i].melee,
+        magic: rows[1][i] != null ? rows[1][i] : draft.stats[i].magic,
+        speed: rows[2][i] != null ? rows[2][i] : draft.stats[i].speed,
+      };
+    }
+  }
   return draft;
 }
 function draftErrors(d) {
@@ -348,17 +396,132 @@ async function getWorker() {
   }
   return workerPromise;
 }
-async function onPhoto(file) {
+const TEXT_CHARS = "0123456789АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюяABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz .,:-–—«»()";
+function loadSrc(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("image"));
+    img.src = src;
+  });
+}
+function defaultCrop(w, h) {
+  const aspect = w / h;
+  if (aspect > 0.9) {
+    const cw = Math.min(0.96, (0.72 * h) / w);
+    return { x: (1 - cw) / 2, y: 0.02, w: cw, h: 0.96 };
+  }
+  return { x: 0.04, y: 0.04, w: 0.92, h: 0.92 };
+}
+function sliceCanvas(source, fx, fy, fw, fh, scale) {
+  const sw = source.width;
+  const sh = source.height;
+  const sx = Math.max(0, Math.round(sw * fx));
+  const sy = Math.max(0, Math.round(sh * fy));
+  const w = Math.max(1, Math.min(sw - sx, Math.round(sw * fw)));
+  const h = Math.max(1, Math.min(sh - sy, Math.round(sh * fh)));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  const g = canvas.getContext("2d", { willReadFrequently: true });
+  g.imageSmoothingEnabled = false;
+  g.drawImage(source, sx, sy, w, h, 0, 0, canvas.width, canvas.height);
+  const image = g.getImageData(0, 0, canvas.width, canvas.height);
+  const d = image.data;
+  for (let i = 0; i < d.length; i += 4) {
+    let y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    y = (y - 140) * 1.7 + 140;
+    const v = y < 0 ? 0 : y > 255 ? 255 : y;
+    d[i] = d[i + 1] = d[i + 2] = v;
+  }
+  g.putImageData(image, 0, 0);
+  return canvas;
+}
+function setOcr(label) {
+  const el = document.getElementById("ocr-status");
+  const bar = document.getElementById("ocr-bar");
+  if (el) el.textContent = label;
+  if (bar) bar.style.width = "50%";
+}
+async function readCanvas(worker, canvas, psm, digits) {
+  await worker.setParameters({
+    tessedit_pageseg_mode: String(psm),
+    tessedit_char_whitelist: digits ? "0123456789" : TEXT_CHARS,
+  });
+  const result = await worker.recognize(canvas);
+  return (result.data && result.data.text) || "";
+}
+async function recognizeCard(source) {
+  const worker = await getWorker();
+  const full = drawImage(source, 1800, true);
+  setOcr("Читаю карточку целиком…");
+  const wholeA = await readCanvas(worker, full, 6, false);
+  setOcr("Второй проход по всей карточке…");
+  const wholeB = await readCanvas(worker, full, 4, false);
+  const draft = parseHeroText(wholeA + "\n" + wholeB);
+  const names = { name: "имя", race: "расу", ability: "умение", health: "здоровье", boon: "предел преимуществ", treasure: "предел сокровищ" };
+  const spots = [
+    ["name", 0.40, 0.01, 0.36, 0.14, 7, false],
+    ["race", 0.62, 0.02, 0.36, 0.16, 7, false],
+    ["ability", 0.38, 0.42, 0.60, 0.28, 6, false],
+    ["health", 0.34, 0.50, 0.24, 0.22, 8, true],
+    ["boon", 0.34, 0.72, 0.16, 0.18, 10, true],
+    ["treasure", 0.48, 0.72, 0.18, 0.20, 10, true],
+  ];
+  const regions = {};
+  for (const [key, x, y, w, h, psm, digits] of spots) {
+    setOcr("Читаю " + names[key] + "…");
+    regions[key] = await readCanvas(worker, sliceCanvas(full, x, y, w, h, 2), psm, digits);
+  }
+  const grid = [];
+  const statNames = ["ближний бой", "магию", "скорость"];
+  for (let row = 0; row < 3; row++) {
+    setOcr("Читаю " + statNames[row] + "…");
+    const line = await readCanvas(worker, sliceCanvas(full, 0.46, 0.16 + row * 0.09, 0.52, 0.09, 3), 7, true);
+    let four = lineDigits(line);
+    if (!four || isLevelHeader(four)) {
+      four = [];
+      for (let col = 0; col < 4; col++) {
+        const cell = await readCanvas(worker, sliceCanvas(full, 0.46 + col * 0.13, 0.16 + row * 0.09, 0.13, 0.09, 4), 10, true);
+        four.push(smallNumber(cell));
+      }
+    }
+    grid.push(four);
+  }
+  regions.grid = grid;
+  draft.ocrText = [wholeA, wholeB, regions.name, regions.race, regions.ability].filter(Boolean).join("\n").trim();
+  applyRegions(draft, regions);
+  await worker.setParameters({ tessedit_pageseg_mode: "6", tessedit_char_whitelist: TEXT_CHARS });
+  return draft;
+}
+async function startCrop(file) {
   let img;
   try { img = await loadImage(file); } catch (e) { flash("Этот снимок не открылся. Нужен JPEG или PNG."); return; }
-  state.draft.photo = drawImage(img, 420, false).toDataURL("image/jpeg", 0.72);
+  const prepared = drawImage(img, 1600, false);
+  state.originalSrc = prepared.toDataURL("image/jpeg", 0.86);
+  state.cropSize = { w: prepared.width, h: prepared.height };
+  state.crop = Object.assign({ src: state.originalSrc }, defaultCrop(prepared.width, prepared.height));
+  render();
+}
+function cropCanvas(img, crop) {
+  const canvas = document.createElement("canvas");
+  const sx = Math.round(img.width * crop.x);
+  const sy = Math.round(img.height * crop.y);
+  const sw = Math.max(1, Math.round(img.width * crop.w));
+  const sh = Math.max(1, Math.round(img.height * crop.h));
+  canvas.width = sw;
+  canvas.height = sh;
+  canvas.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+  return canvas;
+}
+async function readPrepared(canvas) {
+  state.draft.photo = drawImage(canvas, 420, false).toDataURL("image/jpeg", 0.72);
+  state.crop = null;
   state.scan.busy = true;
   state.scan.error = "";
   render();
   try {
-    const worker = await getWorker();
-    const result = await worker.recognize(drawImage(img, 1600, true));
-    const parsed = parseHeroText(result.data.text || "");
+    const parsed = await recognizeCard(canvas);
     parsed.photo = state.draft.photo;
     parsed.id = state.draft.id;
     parsed.setName = state.draft.setName;
@@ -370,6 +533,60 @@ async function onPhoto(file) {
   }
   state.scan.busy = false;
   render();
+}
+function screenCrop() {
+  const c = state.crop;
+  return `<main class="wrap stack"><h1>Обрезать карточку</h1><p class="note">Сдвиньте рамку так, чтобы внутри была сама карточка: имя сверху, три ряда цифр справа, здоровье и пределы внизу.</p><div class="crop-stage" id="cropper"><img alt="" src="${c.src}"><div class="crop-rect" id="crop-rect" style="left:${c.x * 100}%;top:${c.y * 100}%;width:${c.w * 100}%;height:${c.h * 100}%"><span data-handle="nw"></span><span data-handle="ne"></span><span data-handle="sw"></span><span data-handle="se"></span></div></div><button type="button" class="btn gold block" data-act="crop-read">Прочитать эту область</button><button type="button" class="btn block" data-act="crop-full">Читать всё фото</button><button type="button" class="btn ghost block" data-act="crop-cancel">Отмена</button></main>`;
+}
+function bindCropper() {
+  const stage = document.getElementById("cropper");
+  const rect = document.getElementById("crop-rect");
+  if (!stage || !rect || stage.dataset.bound) return;
+  stage.dataset.bound = "1";
+  let drag = null;
+  const point = (e) => {
+    const box = stage.getBoundingClientRect();
+    return { x: (e.clientX - box.left) / box.width, y: (e.clientY - box.top) / box.height };
+  };
+  const paint = () => {
+    const c = state.crop;
+    rect.style.left = (c.x * 100) + "%";
+    rect.style.top = (c.y * 100) + "%";
+    rect.style.width = (c.w * 100) + "%";
+    rect.style.height = (c.h * 100) + "%";
+  };
+  stage.addEventListener("pointerdown", (e) => {
+    const handle = e.target.dataset.handle || "";
+    if (!handle && e.target !== rect) return;
+    const p = point(e);
+    drag = { mode: handle || "move", px: p.x, py: p.y, x: state.crop.x, y: state.crop.y, w: state.crop.w, h: state.crop.h };
+    stage.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  stage.addEventListener("pointermove", (e) => {
+    if (!drag || !state.crop) return;
+    const p = point(e);
+    const dx = p.x - drag.px;
+    const dy = p.y - drag.py;
+    let x = drag.x, y = drag.y, w = drag.w, h = drag.h;
+    if (drag.mode === "move") { x += dx; y += dy; }
+    if (drag.mode === "se") { w += dx; h += dy; }
+    if (drag.mode === "nw") { x += dx; y += dy; w -= dx; h -= dy; }
+    if (drag.mode === "ne") { y += dy; w += dx; h -= dy; }
+    if (drag.mode === "sw") { x += dx; w -= dx; h += dy; }
+    w = Math.max(0.2, w);
+    h = Math.max(0.2, h);
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x + w > 1) x = 1 - w;
+    if (y + h > 1) y = 1 - h;
+    state.crop.x = x;
+    state.crop.y = y;
+    state.crop.w = w;
+    state.crop.h = h;
+    paint();
+  });
+  stage.addEventListener("pointerup", () => { drag = null; });
 }
 
 function current() { return state.game.players[state.game.active]; }
@@ -440,7 +657,11 @@ function removeCard(p, id) {
   }
 }
 function applyRecovery() {
+  const g = state.game;
   const p = current();
+  const gain = g.recover || { glory: 1, peril: 1 };
+  p.glory += Math.max(0, num(gain.glory));
+  p.peril += Math.max(0, num(gain.peril));
   p.cards.filter((c) => c.until === "turn").forEach((c) => removeCard(p, c.id));
   p.ap = Math.max(0, statsOf(p).speed);
   p.savedAp = 0;
@@ -478,6 +699,7 @@ function endTurn() {
   if (i <= g.active) g.round += 1;
   g.active = i;
   g.phase = "recovery";
+  g.recover = { glory: 1, peril: 1 };
   g.fights = [];
   g.counterSeen = false;
   state.counter = null;
@@ -503,6 +725,7 @@ function evaluate() {
           if (j <= g.active) g.round += 1;
           g.active = j;
           g.phase = "recovery";
+          g.recover = { glory: 1, peril: 1 };
           g.prompt = null;
           break;
         }
@@ -576,7 +799,7 @@ function view() {
   if (!state.settings) return "";
   if (state.screen === "settings") return screenSettings();
   if (state.screen === "library") return screenLibrary();
-  if (state.screen === "hero") return screenHero();
+  if (state.screen === "hero") return state.crop ? screenCrop() : screenHero();
   if (state.screen === "setup") return screenSetup();
   if (state.screen === "play" && state.game) return screenPlay();
   return screenHome();
@@ -609,7 +832,7 @@ function screenHero() {
   const row = (label, key) => `<span>${label}</span>` + d.stats.map((s, i) => numInput(`stats.${i}.${key}`, s[key])).join("");
   const photo = d.photo ? `<img class="photo-frame" alt="Карточка героя" src="${d.photo}">` : `<div class="photo-frame" style="height:140px"></div>`;
   const busy = state.scan.busy ? `<p id="ocr-status">Читаю карточку…</p><div class="bar"><i id="ocr-bar"></i></div>` : "";
-  return `<main class="wrap stack"><button type="button" class="btn ghost" data-act="back">Назад</button><h1>${d.id ? "Герой" : "Новый герой"}</h1><p class="note">Держите в кадре имя и таблицу уровней. Пустые клетки подсвечены — их нужно заполнить.</p>${state.scan.error ? `<p class="note">${esc(state.scan.error)}</p>` : ""}${photo}${busy}<div class="row"><button type="button" class="btn" data-act="pick" data-mode="camera">Переснять</button><button type="button" class="btn ghost" data-act="pick" data-mode="file">Другой файл</button></div>
+  return `<main class="wrap stack"><button type="button" class="btn ghost" data-act="back">Назад</button><h1>${d.id ? "Герой" : "Новый герой"}</h1><p class="note">Сначала обрежьте фото по карточке. Имя сверху, справа цифры уровней, внизу здоровье и пределы.</p>${state.scan.error ? `<p class="note">${esc(state.scan.error)}</p>` : ""}${photo}${busy}<div class="row"><button type="button" class="btn" data-act="pick" data-mode="camera">Переснять</button><button type="button" class="btn ghost" data-act="pick" data-mode="file">Другой файл</button>${state.originalSrc ? `<button type="button" class="btn ghost" data-act="crop-again">Обрезать</button>` : ""}</div>
   <label class="field">Имя<input data-bind="draft.name" value="${esc(d.name)}"></label>
   <label class="field">Раса и класс<input data-bind="draft.race" value="${esc(d.race)}"></label>
   <label class="field">Набор<input data-bind="draft.setName" value="${esc(d.setName)}" placeholder="Пустыня, Ледяная ведьма…"></label>
@@ -691,7 +914,10 @@ function phaseBody() {
   ensureDecks(g);
   const p = current();
   const st = statsOf(p);
-  if (g.phase === "recovery") return `<p class="note">Старые очки действия сгорают, в том числе сохранённое на чужой ход. Новые станут равны скорости: <b>${st.speed}</b>.</p><div class="spread"><span>Слава</span>${stepper(p.glory, "bump", `data-id="${p.id}" data-key="glory"`)}</div><div class="spread"><span>Риск</span>${stepper(p.peril, "bump", `data-id="${p.id}" data-key="peril"`)}</div><p class="note">Здесь же, без прокрутки к карточке. Минус снимает лишнее.</p>`;
+  if (g.phase === "recovery") {
+    const gain = g.recover || { glory: 1, peril: 1 };
+    return `<p class="note">Старые очки действия сгорают, в том числе сохранённое на чужой ход. Новые станут равны скорости: <b>${st.speed}</b>.</p><div class="spread"><span>Слава локации</span>${stepper(gain.glory, "recover", 'data-key="glory"')}</div><div class="spread"><span>Риск локации</span>${stepper(gain.peril, "recover", 'data-key="peril"')}</div><p class="note">Это очки клетки, на которой стоит герой, а не его текущий запас. Каждый заход фазы начинается с 1 и 1. Они прибавятся, когда нажмёте «Восстановить».</p>`;
+  }
   if (g.phase === "villainy") return villainyBody();
   if (g.phase === "location") {
     const left = g.decks[g.plane];
@@ -718,8 +944,8 @@ function compareLine(mine, theirs) {
   return "Поровну";
 }
 function blankFight() {
-  const foes = livingFoes();
-  const foe = foes[0];
+  const foes = fightPool();
+  const foe = foes[0] || livingFoes()[0];
   const me = current();
   return {
     foeId: foe ? foe.id : "",
@@ -757,9 +983,15 @@ function turnCardsHtml(p) {
   }).join("");
   return `<div class="stack"><p class="note">Мгновенные улучшения — снимите, когда они уже сыграны</p><div class="cards">${rows}</div></div>`;
 }
+function fightPool() {
+  const foes = livingFoes();
+  if (foes.length <= 1) return foes;
+  const chosen = foes.find((p) => p.id === state.game.targetId);
+  return chosen ? [chosen] : [];
+}
 function fightHtml() {
   const g = state.game;
-  const foes = livingFoes();
+  const foes = fightPool();
   if (!foes.length) return "";
   const me = current();
   g.fights = Array.isArray(g.fights) ? g.fights : [];
@@ -775,17 +1007,23 @@ function fightHtml() {
   const played = g.fights.length ? `<button type="button" class="btn gold block" data-act="cards-played">Карты злодеяний отыграны</button><p class="note">После этого, если у соперника сохранено действие, откроется контратака.</p>` : "";
   return `<div class="stack"><h3>Карты злодеяний</h3>${stepper(g.fights.length, "fight-count")}<p class="note">Сколько карт разыгрываете. По каждой — своё сравнение: выберите характеристику и поправьте числа после кубиков.</p>${rows}${played}</div>`;
 }
+function foeArticle(p) {
+  const g = state.game;
+  const pay = g.pay[p.id] || 1;
+  const st = statsOf(p);
+  return `<article class="foe">${face(p.photo, p.heroName, "face")}<div class="stack" style="flex:1"><b>${esc(p.heroName)}</b><span class="muted">${esc(p.playerName)} · риск <b data-foe-peril="${p.id}">${p.peril}</b> · здоровье ${p.health}${p.savedAp ? " · действие на контратаку" : ""}</span><p class="brief"><span>ближний <b>${st.melee}</b></span><span>магия <b>${st.magic}</b></span><span>слава <b>${p.glory}</b></span>${p.savedAp ? `<span>контратака</span>` : ""}</p>${turnCardsHtml(p)}<div class="stepper"><button type="button" data-act="pay" data-id="${p.id}" data-delta="-1">−</button><b>${pay}</b><button type="button" data-act="pay" data-id="${p.id}" data-delta="1">+</button></div><button type="button" class="btn gold" data-act="spend" data-id="${p.id}">Списать его риск</button><div class="row"><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="-1">Рана</button><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="1">Лечение</button><button type="button" class="tiny" data-act="grant-peril" data-id="${p.id}">+1 риск</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="curse">Эффект</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="instant">Его ответ</button></div></div></article>`;
+}
 function villainyBody() {
   const g = state.game;
   const me = current();
   const foes = livingFoes();
-  const any = foes.some((p) => p.peril > 0);
-  const blocks = foes.map((p) => {
-    const pay = g.pay[p.id] || 1;
-    const st = statsOf(p);
-    return `<article class="foe">${face(p.photo, p.heroName, "face")}<div class="stack" style="flex:1"><b>${esc(p.heroName)}</b><span class="muted">${esc(p.playerName)} · риск <b data-foe-peril="${p.id}">${p.peril}</b> · здоровье ${p.health}${p.savedAp ? " · действие на контратаку" : ""}</span><p class="brief"><span>ближний <b>${st.melee}</b></span><span>магия <b>${st.magic}</b></span><span>слава <b>${p.glory}</b></span>${p.savedAp ? `<span>контратака</span>` : ""}</p>${turnCardsHtml(p)}<div class="stepper"><button type="button" data-act="pay" data-id="${p.id}" data-delta="-1">−</button><b>${pay}</b><button type="button" data-act="pay" data-id="${p.id}" data-delta="1">+</button></div><button type="button" class="btn gold" data-act="spend" data-id="${p.id}">Списать его риск</button><div class="row"><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="-1">Рана</button><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="1">Лечение</button><button type="button" class="tiny" data-act="grant-peril" data-id="${p.id}">+1 риск</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="curse">Эффект</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="instant">Его ответ</button></div></div></article>`;
-  }).join("");
-  return `<p class="note">Спишите риск одного соперника на проклятие или столкновение. Одну карту нельзя оплатить двоими. Свой риск тратить нельзя. Слава соперника — на случай зелья.</p>${any ? "" : `<p class="note">Ни у кого из соперников нет риска — фазу можно пропустить.</p>`}<div class="stack">${blocks}</div>${fightHtml()}<div class="row"><button type="button" class="tiny" data-act="grant-glory">+1 слава за рану монстру</button><button type="button" class="tiny" data-act="grant-peril" data-id="${me.id}">+1 риск себе</button></div>`;
+  const many = foes.length > 1;
+  const chosen = many ? foes.find((p) => p.id === g.targetId) : foes[0];
+  const picker = many ? `<div class="row">${foes.map((p) => `<button type="button" class="tiny ${chosen && p.id === chosen.id ? "gold" : ""}" data-act="pick-target" data-id="${p.id}">${esc(p.heroName)}</button>`).join("")}</div>` : "";
+  if (many && !chosen) return `<p class="note">Игроков больше двух. Выберите, кого атакуете и чей риск списываете.</p>${picker}`;
+  const any = chosen ? chosen.peril > 0 : false;
+  const blocks = chosen ? foeArticle(chosen) : "";
+  return `<p class="note">${many ? "Атака и списание риска — только у выбранного соперника. " : ""}Спишите риск одного соперника на проклятие или столкновение. Одну карту нельзя оплатить двоими. Свой риск тратить нельзя.</p>${picker}${any ? "" : `<p class="note">У выбранного соперника нет риска — фазу можно пропустить.</p>`}<div class="stack">${blocks}</div>${fightHtml()}<div class="row"><button type="button" class="tiny" data-act="grant-glory">+1 слава за рану монстру</button><button type="button" class="tiny" data-act="grant-peril" data-id="${me.id}">+1 риск себе</button></div>`;
 }
 function deedsBody() {
   const g = state.game;
@@ -1050,7 +1288,7 @@ const actions = {
     state.game = {
       players: setup.seats.map((seat) => makePlayer(seat, state.heroes.find((h) => h.id === seat.heroId))),
       active: setup.first, phase: "recovery", round: 1, decks: startingDecks(state.settings), plane: "surface", locationsLeft: startingDecks(state.settings).surface + startingDecks(state.settings).dungeon,
-      prompt: null, stay: { glory: 0, peril: 0 }, saveAp: false, pay: {}, fights: [], victory: null,
+      prompt: null, stay: { glory: 0, peril: 0 }, recover: { glory: 1, peril: 1 }, saveAp: false, pay: {}, fights: [], victory: null,
     };
     state.history = [];
     saveGame();
@@ -1109,6 +1347,24 @@ const actions = {
     commit(() => { foe.peril -= amount; });
   },
   bump(btn) { commit(() => bump(byId(btn.dataset.id), btn.dataset.key, Number(btn.dataset.delta))); },
+  recover(btn) {
+    const g = state.game;
+    g.recover = g.recover || { glory: 1, peril: 1 };
+    const key = btn.dataset.key === "peril" ? "peril" : "glory";
+    g.recover[key] = Math.max(0, num(g.recover[key]) + Number(btn.dataset.delta));
+    saveGame();
+    render();
+  },
+  "pick-target"(btn) {
+    state.game.targetId = btn.dataset.id;
+    const foe = byId(btn.dataset.id);
+    (state.game.fights || []).forEach((f) => {
+      f.foeId = btn.dataset.id;
+      if (foe) f.theirs = statsOf(foe)[f.stat === "magic" ? "magic" : "melee"];
+    });
+    saveGame();
+    render();
+  },
   "grant-peril"(btn) { commit(() => { byId(btn.dataset.id).peril += 1; }); },
   "grant-glory"() { commit(() => { current().glory += 1; }); },
   "cards-played"() {
@@ -1259,6 +1515,20 @@ const actions = {
   },
   "confirm-yes"() { const run = state.confirm && state.confirm.run; state.confirm = null; if (run) Promise.resolve(run()).then(() => render()); },
   "confirm-no"() { state.confirm = null; render(); },
+  async "crop-read"() {
+    const img = await loadSrc(state.originalSrc);
+    await readPrepared(cropCanvas(img, state.crop));
+  },
+  async "crop-full"() {
+    const img = await loadSrc(state.originalSrc);
+    await readPrepared(drawImage(img, 1600, false));
+  },
+  "crop-cancel"() { state.crop = null; render(); },
+  "crop-again"() {
+    if (!state.originalSrc || !state.cropSize) return;
+    state.crop = Object.assign({ src: state.originalSrc }, defaultCrop(state.cropSize.w, state.cropSize.h));
+    render();
+  },
   async "refresh-app"() {
     try {
       if ("caches" in window) {
@@ -1321,7 +1591,7 @@ function onClick(e) {
 async function onFile(e) {
   const file = e.target.files && e.target.files[0];
   e.target.value = "";
-  if (file && state.draft) await onPhoto(file);
+  if (file && state.draft) await startCrop(file);
 }
 
 function bind() {
