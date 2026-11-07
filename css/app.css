@@ -160,6 +160,11 @@ article.hero-tile > button.hero-tile {
   background: #140f0c; padding: 8px 10px;
 }
 .field { display: flex; flex-direction: column; gap: 6px; }
+.suggest { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow: auto; }
+.suggest[hidden] { display: none; }
+.suggest button { text-align: left; background: #140f0c; border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; min-height: 44px; }
+.suggest button b { display: block; }
+.suggest button small { display: block; color: var(--muted); font-size: 0.85rem; }
 .field textarea { min-height: 88px; resize: vertical; }
 .missing { outline: 2px solid var(--peril); }
 .photo-frame { width: min(220px, 60%); border-radius: 16px; border: 1px dashed var(--line); overflow: hidden; }

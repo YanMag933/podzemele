@@ -107,6 +107,33 @@ function loadCardBook() {
 function savedCards(kind) {
   return loadCardBook().filter((c) => c.kind === kind).sort((a, b) => a.name.localeCompare(b.name, "ru"));
 }
+function savedTypes() {
+  return [...new Set(savedCards("treasure").map((c) => String(c.typeName || "").trim()).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, "ru"));
+}
+function refreshSuggest(input) {
+  const box = input.parentElement && input.parentElement.querySelector(".suggest");
+  if (!box || !state.modal) return;
+  const q = String(input.value || "").trim().toLowerCase();
+  let html = "";
+  if (input.dataset.bind === "modal.name") {
+    html = savedCards(state.modal.kind)
+      .filter((c) => !q || c.name.toLowerCase().includes(q))
+      .slice(0, 8)
+      .map((c) => {
+        const extra = cardBits(c).join(", ");
+        return `<button type="button" data-act="pick-card" data-id="${esc(c.id)}"><b>${esc(c.name)}</b>${extra ? `<small>${esc(extra)}</small>` : ""}</button>`;
+      }).join("");
+  } else if (input.dataset.bind === "modal.typeName") {
+    html = savedTypes()
+      .filter((t) => !q || t.toLowerCase().includes(q))
+      .slice(0, 8)
+      .map((t) => `<button type="button" data-act="pick-type" data-type="${esc(t)}">${esc(t)}</button>`)
+      .join("");
+  }
+  box.innerHTML = html;
+  box.hidden = !html;
+}
 function rememberCard(card) {
   if (!card || (card.kind !== "boon" && card.kind !== "treasure")) return "";
   const name = String(card.name || "").trim();
@@ -1157,10 +1184,9 @@ function cardHtml() {
   const kinds = [["boon", "Преимущество"], ["treasure", "Сокровище"], ["instant", "Мгновенная"], ["curse", "Эффект"]].map(([id, name]) => `<button type="button" class="tiny ${m.kind === id ? "gold" : ""}" data-act="kind" data-kind="${id}">${name}</button>`).join("");
   const who = state.game.players.map((p) => `<option value="${p.id}" ${p.id === m.targetId ? "selected" : ""}>${esc(p.heroName)}</option>`).join("");
   const book = (m.kind === "boon" || m.kind === "treasure") ? savedCards(m.kind) : [];
-  const known = book.length
-    ? `<label class="field">Сохранённые<select data-fill-card><option value="">Выбрать и подставить статы</option>${book.map((c) => { const extra = cardBits(c).join(", "); return `<option value="${esc(c.id)}">${esc(c.name)}${extra ? " · " + esc(extra) : ""}</option>`; }).join("")}</select></label><datalist id="known-cards">${book.map((c) => `<option value="${esc(c.name)}"></option>`).join("")}</datalist>`
-    : "";
-  return `<div class="modal"><div class="stack"><div class="spread"><h2>Карта или эффект</h2><button type="button" class="tiny" data-act="close-card">Закрыть</button></div><div class="row">${kinds}</div>${known}<label class="field">Название<input data-bind="modal.name" list="known-cards" value="${esc(m.name)}" autocomplete="off"></label>${m.kind === "treasure" ? `<label class="field">Тип сокровища<input data-bind="modal.typeName" value="${esc(m.typeName)}" placeholder="шлем, плащ…"></label>` : ""}${m.kind === "curse" ? `<label class="field">На кого<select data-bind="modal.targetId">${who}</select></label>` : ""}${m.kind !== "curse" ? step("cost", "Цена в славе") : ""}<div class="row"><button type="button" class="tiny ${m.until === "permanent" ? "gold" : ""}" data-act="until" data-until="permanent">Постоянная</button><button type="button" class="tiny ${m.until === "turn" ? "gold" : ""}" data-act="until" data-until="turn">До восстановления</button></div>${step("melee", "Ближний")}${step("magic", "Магия")}${step("speed", "Скорость")}${step("heal", "Лечение сейчас")}${step("healthMax", "Максимум здоровья")}${step("boonLimit", "Предел преимуществ")}${step("treasureLimit", "Предел сокровищ")}${special}<button type="button" class="btn gold block" data-act="play-card">Сыграть</button></div></div>`;
+  const nameBox = book.length ? `<div class="suggest" hidden></div>` : "";
+  const typeBox = m.kind === "treasure" && savedTypes().length ? `<div class="suggest" hidden></div>` : "";
+  return `<div class="modal"><div class="stack"><div class="spread"><h2>Карта или эффект</h2><button type="button" class="tiny" data-act="close-card">Закрыть</button></div><div class="row">${kinds}</div><label class="field">Название<input data-bind="modal.name" value="${esc(m.name)}" autocomplete="off" placeholder="Начните вводить">${nameBox}</label>${m.kind === "treasure" ? `<label class="field">Тип сокровища<input data-bind="modal.typeName" value="${esc(m.typeName)}" placeholder="шлем, плащ…" autocomplete="off">${typeBox}</label>` : ""}${m.kind === "curse" ? `<label class="field">На кого<select data-bind="modal.targetId">${who}</select></label>` : ""}${m.kind !== "curse" ? step("cost", "Цена в славе") : ""}<div class="row"><button type="button" class="tiny ${m.until === "permanent" ? "gold" : ""}" data-act="until" data-until="permanent">Постоянная</button><button type="button" class="tiny ${m.until === "turn" ? "gold" : ""}" data-act="until" data-until="turn">До восстановления</button></div>${step("melee", "Ближний")}${step("magic", "Магия")}${step("speed", "Скорость")}${step("heal", "Лечение сейчас")}${step("healthMax", "Максимум здоровья")}${step("boonLimit", "Предел преимуществ")}${step("treasureLimit", "Предел сокровищ")}${special}<button type="button" class="btn gold block" data-act="play-card">Сыграть</button></div></div>`;
 }
 function victoryHtml() {
   const g = state.game;
@@ -1656,6 +1682,17 @@ const actions = {
   mod(btn) { state.modal[btn.dataset.key] = (state.modal[btn.dataset.key] || 0) + Number(btn.dataset.delta); render(); },
   "special-toggle"() { state.modal.specialOn = !state.modal.specialOn; render(); },
   "special-stat"(btn) { state.modal.specialStat = btn.dataset.stat === "melee" ? "melee" : "magic"; render(); },
+  "pick-card"(btn) {
+    const found = loadCardBook().find((c) => c.id === btn.dataset.id);
+    if (!found) return;
+    applySavedCard(found);
+    render();
+  },
+  "pick-type"(btn) {
+    if (!state.modal) return;
+    state.modal.typeName = btn.dataset.type || "";
+    render();
+  },
   "play-card"() {
     const problem = cardProblem();
     if (problem) { flash(problem); return; }
@@ -1725,6 +1762,7 @@ function onInput(e) {
   if (path.startsWith("draft.")) setPath(state.draft, path.slice(6), value);
   else if (path.startsWith("modal.")) {
     setPath(state.modal, path.slice(6), value);
+    if (path === "modal.name" || path === "modal.typeName") refreshSuggest(el);
     if (e.type === "change" && path === "modal.name" && (state.modal.kind === "boon" || state.modal.kind === "treasure")) {
       const found = savedCards(state.modal.kind).find((c) => c.name.toLowerCase() === String(value).trim().toLowerCase());
       if (found) { applySavedCard(found); render(); }
@@ -1751,6 +1789,16 @@ function bind() {
   window.addEventListener("click", onClick, true);
   app.addEventListener("input", onInput);
   app.addEventListener("change", onInput);
+  app.addEventListener("focusin", (e) => {
+    if (e.target.dataset && (e.target.dataset.bind === "modal.name" || e.target.dataset.bind === "modal.typeName")) refreshSuggest(e.target);
+  });
+  app.addEventListener("focusout", (e) => {
+    const box = e.target.parentElement && e.target.parentElement.querySelector(".suggest");
+    if (box) setTimeout(() => { box.hidden = true; }, 250);
+  });
+  app.addEventListener("pointerdown", (e) => {
+    if (e.target.closest(".suggest button")) e.preventDefault();
+  });
   document.getElementById("photo-input").addEventListener("change", onFile);
   document.getElementById("camera-input").addEventListener("change", onFile);
 }
