@@ -1201,10 +1201,6 @@ function cardProblem() {
     const count = countKind(target, card.kind) + 1;
     if (count > (card.kind === "boon" ? lim.boon : lim.treasure)) return card.kind === "boon" ? "Предел преимуществ" : "Предел сокровищ";
   }
-  if (card.kind === "treasure" && card.until === "permanent" && card.typeName) {
-    const t = card.typeName.toLowerCase();
-    if (target.cards.some((c) => c.kind === "treasure" && c.until === "permanent" && (c.typeName || "").trim().toLowerCase() === t)) return "Такое сокровище уже есть";
-  }
   return "";
 }
 function modalCard() {
