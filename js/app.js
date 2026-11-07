@@ -636,7 +636,7 @@ function statsOf(p) {
   return {
     melee: base.melee + mod.melee + (p.rewardMelee || 0) + (escort ? num(escort.melee) : 0),
     magic: base.magic + mod.magic + (escort ? num(escort.magic) : 0),
-    speed: base.speed + mod.speed + (escort ? num(escort.speed) : 0),
+    speed: base.speed + mod.speed + (p.rewardSpeed || 0) + (escort ? num(escort.speed) : 0),
     extra: base.extra, base, mod, escort,
   };
 }
@@ -787,7 +787,7 @@ function addQuest(delta) {
   const bits = ["Задание засчитано"];
   if (info === null) bits.push("уровень уже максимальный");
   else if (info) bits.push(info);
-  state.reward = { health: 0, peril: 0, glory: 0, melee: 0 };
+  state.reward = { health: 0, peril: 0, glory: 0, melee: 0, speed: 0 };
   flash(bits.join(". "));
 }
 
@@ -825,6 +825,7 @@ function statHint(p, key) {
   if (st.extra) bits.push("4-й +" + st.extra);
   if (st.mod[key]) bits.push("вещи " + (st.mod[key] > 0 ? "+" : "") + st.mod[key]);
   if (key === "melee" && p.rewardMelee) bits.push("задания +" + p.rewardMelee);
+  if (key === "speed" && p.rewardSpeed) bits.push("задания +" + p.rewardSpeed);
   if (st.escort && num(st.escort[key])) bits.push("сопровождение " + (num(st.escort[key]) > 0 ? "+" : "") + num(st.escort[key]));
   return bits.join(" · ");
 }
@@ -1163,7 +1164,7 @@ function rewardHtml() {
   if (!state.reward || !state.game) return "";
   const r = state.reward;
   const step = (key, label) => `<div class="spread"><span>${label}</span><div class="stepper"><button type="button" data-act="reward" data-key="${key}" data-delta="-1">−</button><b>${r[key] || 0}</b><button type="button" data-act="reward" data-key="${key}" data-delta="1">+</button></div></div>`;
-  return `<div class="modal reward"><div class="stack"><h2>Награда задания</h2><p class="note">Что герой получил за задание. Ноль — ничего не прибавлять. Ближний бой остаётся на герое.</p>${step("health", "Здоровье")}${step("peril", "Риск")}${step("glory", "Слава")}${step("melee", "Ближний бой")}<button type="button" class="btn gold block" data-act="apply-reward">Применить</button><button type="button" class="btn ghost block" data-act="skip-reward">Без награды</button></div></div>`;
+  return `<div class="modal reward"><div class="stack"><h2>Награда задания</h2><p class="note">Что герой получил за задание. Ноль — ничего не прибавлять. Ближний бой и скорость остаются на герое, скорость сразу добавляет действия.</p>${step("health", "Здоровье")}${step("peril", "Риск")}${step("glory", "Слава")}${step("melee", "Ближний бой")}${step("speed", "Скорость")}<button type="button" class="btn gold block" data-act="apply-reward">Применить</button><button type="button" class="btn ghost block" data-act="skip-reward">Без награды</button></div></div>`;
 }
 function menuHtml() {
   if (!state.menu) return "";
@@ -1269,7 +1270,7 @@ function makePlayer(seat, hero) {
     baseHealth: Number(hero.health), baseBoon: Number(hero.boonLimit), baseTreasure: Number(hero.treasureLimit),
     level: 1, health: Number(hero.health), healthMax: Number(hero.health), glory: 1, peril: 1,
     ap: 0, savedAp: 0, quests: 0, moved: false, stayTaken: false, fallen: false, eliminated: false,
-    abilityUsed: false, hand: 5, cards: [], rewardMelee: 0,
+    abilityUsed: false, hand: 5, cards: [], rewardMelee: 0, rewardSpeed: 0,
   };
 }
 function openForm(hero, back) {
@@ -1536,16 +1537,18 @@ const actions = {
   },
   "skip-reward"() { state.reward = null; render(); },
   "apply-reward"() {
-    const r = state.reward || { health: 0, peril: 0, glory: 0, melee: 0 };
+    const r = state.reward || { health: 0, peril: 0, glory: 0, melee: 0, speed: 0 };
     const p = current();
     state.reward = null;
-    if (!p || !(r.health || r.peril || r.glory || r.melee)) { render(); return; }
+    if (!p || !(r.health || r.peril || r.glory || r.melee || r.speed)) { render(); return; }
     const room = p.healthMax - p.health;
     commit(() => {
       p.health = clamp(p.health + (r.health || 0), 0, p.healthMax);
       p.peril = Math.max(0, p.peril + (r.peril || 0));
       p.glory = Math.max(0, p.glory + (r.glory || 0));
       p.rewardMelee = Math.max(0, (p.rewardMelee || 0) + (r.melee || 0));
+      p.rewardSpeed = Math.max(0, (p.rewardSpeed || 0) + (r.speed || 0));
+      if (r.speed) shiftAp(p, r.speed);
     });
     if ((r.health || 0) > room) flash("Здоровье упёрлось в максимум. Поднимите максимум, если награда больше.");
   },
