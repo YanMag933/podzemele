@@ -605,9 +605,12 @@ function itemMods(p) {
 function statsOf(p) {
   const base = printed(p);
   const mod = itemMods(p);
+  const escort = p.escort && p.escort.on ? p.escort : null;
   return {
-    melee: base.melee + mod.melee + (p.rewardMelee || 0), magic: base.magic + mod.magic, speed: base.speed + mod.speed,
-    extra: base.extra, base, mod,
+    melee: base.melee + mod.melee + (p.rewardMelee || 0) + (escort ? num(escort.melee) : 0),
+    magic: base.magic + mod.magic + (escort ? num(escort.magic) : 0),
+    speed: base.speed + mod.speed + (escort ? num(escort.speed) : 0),
+    extra: base.extra, base, mod, escort,
   };
 }
 function limitsOf(p, extra) {
@@ -662,7 +665,7 @@ function applyRecovery() {
   const gain = g.recover || { glory: 1, peril: 1 };
   p.glory += Math.max(0, num(gain.glory));
   p.peril += Math.max(0, num(gain.peril));
-  p.cards.filter((c) => c.until === "turn").forEach((c) => removeCard(p, c.id));
+  dropTurnCards(p);
   p.ap = Math.max(0, statsOf(p).speed);
   p.savedAp = 0;
   p.moved = false;
@@ -673,6 +676,7 @@ function applyRecovery() {
 function nextPhase() {
   if (state.game.phase === "villainy") {
     state.game.fights = [];
+    state.game.counterRolls = {};
     state.game.counterSeen = false;
     state.counter = null;
   }
@@ -699,6 +703,7 @@ function endTurn() {
   if (i <= g.active) g.round += 1;
   g.active = i;
   g.phase = "recovery";
+  dropTurnCards(g.players[i]);
   g.recover = { glory: 1, peril: 1 };
   g.fights = [];
   g.counterSeen = false;
@@ -792,6 +797,7 @@ function statHint(p, key) {
   if (st.extra) bits.push("4-й +" + st.extra);
   if (st.mod[key]) bits.push("вещи " + (st.mod[key] > 0 ? "+" : "") + st.mod[key]);
   if (key === "melee" && p.rewardMelee) bits.push("задания +" + p.rewardMelee);
+  if (st.escort && num(st.escort[key])) bits.push("сопровождение " + (num(st.escort[key]) > 0 ? "+" : "") + num(st.escort[key]));
   return bits.join(" · ");
 }
 
@@ -874,6 +880,7 @@ function screenPlay() {
     : `<b>${p.quests} / ${s.questsToWin}</b>`;
   const hero = `<section class="card stack"><div class="spread">${face(p.photo, p.heroName, "face-lg")}<div class="stack"><p class="kicker">Раунд ${g.round}${state.die ? " · кубик " + state.die : ""}</p><h2>${esc(p.heroName)}</h2><p class="muted">${esc(p.playerName)}${p.race ? " · " + esc(p.race) : ""}</p>${p.eliminated ? `<b>Выбыл</b>` : ""}</div></div>
     <div class="stats"><div class="stat" data-stat="melee"><b>${st.melee}</b><small>Ближний</small><em>${esc(statHint(p, "melee"))}</em></div><div class="stat" data-stat="magic"><b>${st.magic}</b><small>Магия</small><em>${esc(statHint(p, "magic"))}</em></div><div class="stat" data-stat="speed"><b>${st.speed}</b><small>Скорость</small><em>${esc(statHint(p, "speed"))}</em></div></div>
+    ${p.escort && p.escort.on && g.phase !== "deeds" ? `<button type="button" class="btn gold block" data-act="escort-end">Закончить сопровождение</button>` : ""}
     ${heroEffects(p)}
     <div class="spread"><div><p>Уровень <b data-level="${p.level}">${p.level}</b> / ${s.maxLevel}</p><p class="note">${s.maxLevel > 4 ? "Выше 4-го: +1 ко всем за каждый уровень. " : ""}${s.healthOnLevel ? "За уровень +1 к здоровью." : ""}</p></div><div class="row"><button type="button" class="tiny" data-act="level" data-delta="-1">−</button><button type="button" class="tiny" data-act="level" data-delta="1" ${p.level >= s.maxLevel ? "disabled" : ""}>+</button></div></div>
     <div class="spread"><div class="row">${marks}<span>задания ${p.quests}</span></div><button type="button" class="tiny" data-act="quest" data-delta="-1" ${p.quests ? "" : "disabled"}>Снять</button></div>
@@ -938,10 +945,32 @@ function effectsBlock(title, cards) {
   if (!cards.length) return `<p class="fx">${esc(title)}: нет</p>`;
   return `<div class="fx"><b>${esc(title)}</b><ul>${cards.map((c) => `<li><b>${esc(c.name)}</b> — ${esc(c.special.text)}</li>`).join("")}</ul></div>`;
 }
-function compareLine(mine, theirs) {
-  if (mine > theirs) return "Ваш результат выше на " + (mine - theirs);
-  if (mine < theirs) return "У соперника выше на " + (theirs - mine);
+function compareLine(mine, theirs, mineName, foeName) {
+  mineName = mineName || "Ваш результат";
+  foeName = foeName || "соперника";
+  if (mine > theirs) return mineName + " выше на " + (mine - theirs);
+  if (mine < theirs) return "Выше у " + foeName + " на " + (theirs - mine);
   return "Поровну";
+}
+function statKey(stat) {
+  return stat === "magic" || stat === "speed" ? stat : "melee";
+}
+function statTitle(stat) {
+  return stat === "magic" ? "магии" : stat === "speed" ? "скорости" : "ближнему бою";
+}
+function statBrief(p) {
+  if (!p) return "";
+  const st = statsOf(p);
+  return `<p class="brief"><span>ближний <b>${st.melee}</b></span><span>магия <b>${st.magic}</b></span><span>скорость <b>${st.speed}</b></span><span>слава <b>${p.glory}</b></span></p>`;
+}
+function dropTurnCards(p) {
+  if (!p) return;
+  const gone = (p.cards || []).filter((c) => c.until === "turn" || c.kind === "instant");
+  gone.forEach((c) => removeCard(p, c.id));
+  if (gone.length) flash("Сброшено до восстановления: " + gone.map((c) => c.name).join(", "));
+}
+function statButtons(act, extra, current) {
+  return [["melee", "Ближний бой"], ["magic", "Магия"], ["speed", "Скорость"]].map(([id, name]) => `<button type="button" class="tiny ${current === id ? "gold" : ""}" data-act="${act}" data-stat="${id}" ${extra}>${name}</button>`).join("");
 }
 function blankFight() {
   const foes = fightPool();
@@ -952,6 +981,10 @@ function blankFight() {
     stat: "melee",
     mine: me ? statsOf(me).melee : 0,
     theirs: foe ? statsOf(foe).melee : 0,
+    wound: false,
+    glory: 1,
+    gloryTaken: false,
+    gloryTakenAmount: 0,
   };
 }
 function setFightCount(n) {
@@ -981,7 +1014,7 @@ function turnCardsHtml(p) {
     if (spec) bits.push(spec);
     return `<div><span><b>${esc(c.name)}</b><small class="muted">${esc(bits.join(" · ") || "мгновенно")}</small></span><button type="button" class="tiny" data-act="drop-card" data-pid="${p.id}" data-cid="${c.id}">Снять</button></div>`;
   }).join("");
-  return `<div class="stack"><p class="note">Мгновенные улучшения — снимите, когда они уже сыграны</p><div class="cards">${rows}</div></div>`;
+  return `<div class="stack"><p class="note">Мгновенные карты. Снимите, если эффект уже отыгран. Иначе они сами сбросятся в фазе восстановления этого героя.</p><div class="cards">${rows}</div></div>`;
 }
 function fightPool() {
   const foes = livingFoes();
@@ -997,12 +1030,15 @@ function fightHtml() {
   g.fights = Array.isArray(g.fights) ? g.fights : [];
   const rows = g.fights.map((f, i) => {
     const foe = byId(f.foeId) || foes[0];
-    const stat = f.stat === "magic" ? "magic" : "melee";
-    const statName = stat === "magic" ? "магии" : "ближнему бою";
+    const stat = statKey(f.stat);
+    const statName = statTitle(stat);
     const picks = foes.length > 1
       ? `<div class="row">${foes.map((p) => `<button type="button" class="tiny ${p.id === foe.id ? "gold" : ""}" data-act="fight-foe" data-i="${i}" data-id="${p.id}">${esc(p.heroName)}</button>`).join("")}</div>`
       : `<p><b>${esc(foe.heroName)}</b></p>`;
-    return `<article class="fight"><h3>Бой ${i + 1}</h3>${picks}<div class="row"><button type="button" class="tiny ${stat === "melee" ? "gold" : ""}" data-act="fight-stat" data-i="${i}" data-stat="melee">Ближний бой</button><button type="button" class="tiny ${stat === "magic" ? "gold" : ""}" data-act="fight-stat" data-i="${i}" data-stat="magic">Магия</button></div><div class="spread"><span>У меня</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="-1">−</button><b>${f.mine}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="1">+</button></div></div><div class="spread"><span>У соперника</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="-1">−</button><b>${f.theirs}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="1">+</button></div></div><p class="compare">${compareLine(Number(f.mine) || 0, Number(f.theirs) || 0)}</p>${effectsBlock("Ваши эффекты по " + statName, effectsFor(me, stat))}${effectsBlock("Эффекты соперника по " + statName, effectsFor(foe, stat))}</article>`;
+    const speedGlory = stat === "speed"
+      ? `<div class="spread"><span>Слава за успех</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="glory" data-delta="-1">−</button><b>${f.glory || 0}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="glory" data-delta="1">+</button></div></div><button type="button" class="btn ${f.gloryTaken ? "" : "gold"}" data-act="fight-success" data-i="${i}">${f.gloryTaken ? "Слава уже взята — отменить" : "Успех — слава +" + (f.glory || 0)}</button>`
+      : "";
+    return `<article class="fight"><h3>Бой ${i + 1}</h3>${picks}<p class="muted">Вы</p>${statBrief(me)}<p class="muted">Соперник</p>${statBrief(foe)}<div class="row">${statButtons("fight-stat", `data-i="${i}"`, stat)}</div><div class="spread"><span>У меня</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="-1">−</button><b>${f.mine}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="1">+</button></div></div><div class="spread"><span>У соперника</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="-1">−</button><b>${f.theirs}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="1">+</button></div></div><p class="compare">${compareLine(Number(f.mine) || 0, Number(f.theirs) || 0)}</p>${speedGlory}<button type="button" class="btn ${f.wound ? "" : "gold"}" data-act="fight-wound" data-i="${i}">${f.wound ? "Рана уже есть — снять риск" : "Рана — +1 риск сопернику"}</button>${effectsBlock("Ваши эффекты по " + statName, effectsFor(me, stat))}${effectsBlock("Эффекты соперника по " + statName, effectsFor(foe, stat))}</article>`;
   }).join("");
   const played = g.fights.length ? `<button type="button" class="btn gold block" data-act="cards-played">Карты злодеяний отыграны</button><p class="note">После этого, если у соперника сохранено действие, откроется контратака.</p>` : "";
   return `<div class="stack"><h3>Карты злодеяний</h3>${stepper(g.fights.length, "fight-count")}<p class="note">Сколько карт разыгрываете. По каждой — своё сравнение: выберите характеристику и поправьте числа после кубиков.</p>${rows}${played}</div>`;
@@ -1011,7 +1047,7 @@ function foeArticle(p) {
   const g = state.game;
   const pay = g.pay[p.id] || 1;
   const st = statsOf(p);
-  return `<article class="foe">${face(p.photo, p.heroName, "face")}<div class="stack" style="flex:1"><b>${esc(p.heroName)}</b><span class="muted">${esc(p.playerName)} · риск <b data-foe-peril="${p.id}">${p.peril}</b> · здоровье ${p.health}${p.savedAp ? " · действие на контратаку" : ""}</span><p class="brief"><span>ближний <b>${st.melee}</b></span><span>магия <b>${st.magic}</b></span><span>слава <b>${p.glory}</b></span>${p.savedAp ? `<span>контратака</span>` : ""}</p>${turnCardsHtml(p)}<div class="stepper"><button type="button" data-act="pay" data-id="${p.id}" data-delta="-1">−</button><b>${pay}</b><button type="button" data-act="pay" data-id="${p.id}" data-delta="1">+</button></div><button type="button" class="btn gold" data-act="spend" data-id="${p.id}">Списать его риск</button><div class="row"><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="-1">Рана</button><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="1">Лечение</button><button type="button" class="tiny" data-act="grant-peril" data-id="${p.id}">+1 риск</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="curse">Эффект</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="instant">Его ответ</button></div></div></article>`;
+  return `<article class="foe">${face(p.photo, p.heroName, "face")}<div class="stack" style="flex:1"><b>${esc(p.heroName)}</b><span class="muted">${esc(p.playerName)} · риск <b data-foe-peril="${p.id}">${p.peril}</b> · здоровье ${p.health}${p.savedAp ? " · действие на контратаку" : ""}</span><p class="brief"><span>ближний <b>${st.melee}</b></span><span>магия <b>${st.magic}</b></span><span>скорость <b>${st.speed}</b></span><span>слава <b>${p.glory}</b></span>${p.savedAp ? `<span>контратака</span>` : ""}</p>${turnCardsHtml(p)}<div class="stepper"><button type="button" data-act="pay" data-id="${p.id}" data-delta="-1">−</button><b>${pay}</b><button type="button" data-act="pay" data-id="${p.id}" data-delta="1">+</button></div><button type="button" class="btn gold" data-act="spend" data-id="${p.id}">Списать его риск</button><div class="row"><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="-1">Рана</button><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="1">Лечение</button><button type="button" class="tiny" data-act="grant-peril" data-id="${p.id}">+1 риск</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="curse">Эффект</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="instant">Его ответ</button></div></div></article>`;
 }
 function villainyBody() {
   const g = state.game;
@@ -1034,11 +1070,15 @@ function deedsBody() {
   if (g.prompt && g.prompt.type === "move") {
     prompt = `<div class="card stack"><p>Новая локация?</p><p class="note">Слава и риск с карты локации. Если здесь уже были в этот ход — ничего не берите.</p><div class="row"><span>Слава</span>${stepper(g.prompt.glory, "prompt", 'data-key="glory"')}</div><div class="row"><span>Риск</span>${stepper(g.prompt.peril, "prompt", 'data-key="peril"')}</div><div class="row"><button type="button" class="btn gold" data-act="move-new">Забрать</button><button type="button" class="btn" data-act="move-old">Уже был</button><button type="button" class="btn ghost" data-act="move-cancel">Отмена хода</button></div></div>`;
   }
+  const escortOn = p.escort && p.escort.on;
+  const escort = escortOn
+    ? `<div class="stack"><p>Сопровождение</p><p class="note">Плюс или минус к статам на время задания. Минус — ограничение. Скорость сразу меняет текущие действия. Когда закончите, поправки снимутся и задание засчитается.</p><div class="spread"><span>Ближний бой</span>${stepper(num(p.escort.melee), "escort", 'data-key="melee"')}</div><div class="spread"><span>Скорость, действия</span>${stepper(num(p.escort.speed), "escort", 'data-key="speed"')}</div><div class="spread"><span>Магия</span>${stepper(num(p.escort.magic), "escort", 'data-key="magic"')}</div><button type="button" class="btn gold block" data-act="escort-end">${win ? "Закончить сопровождение — задание выполнено" : "Закончить сопровождение"}</button></div>`
+    : `<button type="button" class="btn block" data-act="escort-start">Начать сопровождение</button><button type="button" class="btn block" data-act="quest" data-delta="1">${win ? "Задание выполнено — победа" : "Задание выполнено"}</button>`;
   return `${p.fallen ? `<p class="note">Герой лежит и не может двигаться. Очко действия уходит на подъём.</p><button type="button" class="btn gold" data-act="stand">Встать</button>` : ""}
   <div class="row"><button type="button" class="btn" data-act="move">Перемещение −1</button><button type="button" class="btn" data-act="explore">Исследовать −1</button><button type="button" class="btn" data-act="fall">${p.fallen ? "Уже лежит" : "Упал"}</button></div>
   ${prompt}
   <button type="button" class="btn gold block" data-act="open-card" data-id="${p.id}" data-kind="boon">Карта славы</button>
-  <button type="button" class="btn block" data-act="quest" data-delta="1">${win ? "Задание выполнено — победа" : "Задание выполнено"}</button>
+  ${escort}
   <p class="note">Движение, исследование, карты славы и задания можно мешать. После задания фаза подвигов продолжается. Первая попытка задания за ход не тратит действие.</p>
   ${planeToggle()}
   <p class="note">Исследование берёт карту оттуда, где герой: ${planeLabel(g.plane).toLowerCase()}, осталось ${g.decks[g.plane]}.</p>`;
@@ -1063,11 +1103,22 @@ function phaseButtons() {
 function overlays() {
   return menuHtml() + sheetHtml() + cardHtml() + victoryHtml() + rewardHtml() + counterHtml();
 }
+function counterRoll(foe) {
+  const g = state.game;
+  g.counterRolls = g.counterRolls || {};
+  if (!g.counterRolls[foe.id]) g.counterRolls[foe.id] = { stat: "melee", mine: statsOf(foe).melee, monster: 0 };
+  return g.counterRolls[foe.id];
+}
 function counterHtml() {
   if (!state.counter || !state.game) return "";
   const foes = counterFoes();
   if (!foes.length) return "";
-  const rows = foes.map((p) => `<article class="fight"><h3>${esc(p.heroName)}</h3><p class="note">${esc(p.playerName)} сохранил действие. Успех — рана монстру и слава +1 ему. Провал — без награды, действие всё равно потрачено.</p><div class="row"><button type="button" class="btn gold" data-act="counter" data-id="${p.id}" data-result="hit">Успех — рана монстру</button><button type="button" class="btn" data-act="counter" data-id="${p.id}" data-result="miss">Провал — пропуск</button></div></article>`).join("");
+  const me = current();
+  const rows = foes.map((p) => {
+    const roll = counterRoll(p);
+    const stat = statKey(roll.stat);
+    return `<article class="fight"><h3>${esc(p.heroName)}</h3><p class="note">${esc(p.playerName)} контратакует. Выберите стату и поправьте числа после кубиков. Успех сам добавляет ему славу +1 за рану. Провал — без награды, действие всё равно потрачено.</p><p class="muted">Его статы</p>${statBrief(p)}<p class="muted">Ваши статы</p>${statBrief(me)}<div class="row">${statButtons("counter-stat", `data-id="${p.id}"`, stat)}</div><div class="spread"><span>Его результат</span><div class="stepper"><button type="button" data-act="counter-mod" data-id="${p.id}" data-key="mine" data-delta="-1">−</button><b>${roll.mine}</b><button type="button" data-act="counter-mod" data-id="${p.id}" data-key="mine" data-delta="1">+</button></div></div><div class="spread"><span>Монстр</span><div class="stepper"><button type="button" data-act="counter-mod" data-id="${p.id}" data-key="monster" data-delta="-1">−</button><b>${roll.monster}</b><button type="button" data-act="counter-mod" data-id="${p.id}" data-key="monster" data-delta="1">+</button></div></div><p class="compare">${compareLine(Number(roll.mine) || 0, Number(roll.monster) || 0, "Контратака", "монстра")}</p>${effectsBlock("Его эффекты по " + statTitle(stat), effectsFor(p, stat))}<div class="row"><button type="button" class="btn gold" data-act="counter" data-id="${p.id}" data-result="hit">Успех — слава +1</button><button type="button" class="btn" data-act="counter" data-id="${p.id}" data-result="miss">Провал — пропуск</button></div></article>`;
+  }).join("");
   return `<div class="modal reward"><div class="stack"><h2>Контратака</h2>${rows}</div></div>`;
 }
 function rewardHtml() {
@@ -1313,6 +1364,7 @@ const actions = {
     const phase = state.game.phase;
     ensureDecks(state.game);
     if (phase === "location" && state.game.decks[state.game.plane] <= 0) { flash("Эта колода пуста — переключите ползунок или пропустите"); return; }
+    if (phase === "deeds" && current().escort && current().escort.on) { flash("Сначала закончите сопровождение: поправки снимутся, и задание засчитается"); return; }
     if (phase === "villainy" && (state.game.fights || []).length > 0 && !state.game.counterSeen && counterFoes().length) {
       state.counter = true;
       render();
@@ -1325,7 +1377,10 @@ const actions = {
       else nextPhase();
     });
   },
-  skip() { commit(() => { if (state.game.phase === "discard") endTurn(); else nextPhase(); }); },
+  skip() {
+    if (state.game.phase === "deeds" && current().escort && current().escort.on) { flash("Сначала закончите сопровождение: поправки снимутся, и задание засчитается"); return; }
+    commit(() => { if (state.game.phase === "recovery") dropTurnCards(current()); if (state.game.phase === "discard") endTurn(); else nextPhase(); });
+  },
   plane(btn) {
     ensureDecks(state.game);
     state.game.plane = btn.dataset.plane === "dungeon" ? "dungeon" : "surface";
@@ -1360,7 +1415,7 @@ const actions = {
     const foe = byId(btn.dataset.id);
     (state.game.fights || []).forEach((f) => {
       f.foeId = btn.dataset.id;
-      if (foe) f.theirs = statsOf(foe)[f.stat === "magic" ? "magic" : "melee"];
+      if (foe) f.theirs = statsOf(foe)[statKey(f.stat)];
     });
     saveGame();
     render();
@@ -1402,6 +1457,34 @@ const actions = {
     });
   },
   quest(btn) { commit(() => addQuest(Number(btn.dataset.delta))); },
+  "escort-start"() {
+    const p = current();
+    if (p.escort && p.escort.on) return;
+    commit(() => { p.escort = { on: true, melee: 0, magic: 0, speed: 0, apShift: 0 }; });
+  },
+  escort(btn) {
+    const p = current();
+    const key = btn.dataset.key;
+    if (!p.escort || !p.escort.on || (key !== "melee" && key !== "magic" && key !== "speed")) return;
+    const delta = Number(btn.dataset.delta);
+    commit(() => {
+      const before = p.ap;
+      p.escort[key] = num(p.escort[key]) + delta;
+      if (key === "speed") {
+        shiftAp(p, delta);
+        p.escort.apShift = num(p.escort.apShift) + (p.ap - before);
+      }
+    });
+  },
+  "escort-end"() {
+    const p = current();
+    if (!p.escort || !p.escort.on) return;
+    commit(() => {
+      shiftAp(p, -num(p.escort.apShift));
+      p.escort = { on: false, melee: 0, magic: 0, speed: 0, apShift: 0 };
+      addQuest(1);
+    });
+  },
   reward(btn) {
     const r = state.reward;
     if (!r) return;
@@ -1427,11 +1510,12 @@ const actions = {
   "fight-stat"(btn) {
     const f = (state.game.fights || [])[Number(btn.dataset.i)];
     if (!f) return;
-    f.stat = btn.dataset.stat === "magic" ? "magic" : "melee";
+    f.stat = statKey(btn.dataset.stat);
     const me = current();
     const foe = byId(f.foeId);
     if (me) f.mine = statsOf(me)[f.stat];
     if (foe) f.theirs = statsOf(foe)[f.stat];
+    if (f.glory == null) f.glory = 1;
     saveGame();
     render();
   },
@@ -1440,16 +1524,61 @@ const actions = {
     if (!f) return;
     f.foeId = btn.dataset.id;
     const foe = byId(f.foeId);
-    const stat = f.stat === "magic" ? "magic" : "melee";
-    if (foe) f.theirs = statsOf(foe)[stat];
+    if (foe) f.theirs = statsOf(foe)[statKey(f.stat)];
     saveGame();
     render();
   },
   "fight-mod"(btn) {
     const f = (state.game.fights || [])[Number(btn.dataset.i)];
     if (!f) return;
-    const key = btn.dataset.key === "theirs" ? "theirs" : "mine";
+    const key = btn.dataset.key === "theirs" ? "theirs" : btn.dataset.key === "glory" ? "glory" : "mine";
     f[key] = Math.max(0, (Number(f[key]) || 0) + Number(btn.dataset.delta));
+    saveGame();
+    render();
+  },
+  "fight-wound"(btn) {
+    const f = (state.game.fights || [])[Number(btn.dataset.i)];
+    const foe = f && byId(f.foeId);
+    if (!f || !foe) return;
+    commit(() => {
+      if (f.wound) { foe.peril = Math.max(0, foe.peril - 1); f.wound = false; }
+      else { foe.peril += 1; f.wound = true; }
+    });
+    flash(f.wound ? foe.heroName + ": риск +1 за рану" : "Риск за рану снят");
+  },
+  "fight-success"(btn) {
+    const f = (state.game.fights || [])[Number(btn.dataset.i)];
+    const me = current();
+    if (!f || !me || statKey(f.stat) !== "speed") return;
+    commit(() => {
+      if (f.gloryTaken) {
+        me.glory = Math.max(0, me.glory - (f.gloryTakenAmount || 0));
+        f.gloryTaken = false;
+        f.gloryTakenAmount = 0;
+      } else {
+        const amount = Math.max(0, Number(f.glory) || 0);
+        me.glory += amount;
+        f.gloryTaken = true;
+        f.gloryTakenAmount = amount;
+      }
+    });
+    flash(f.gloryTaken ? "Слава +" + f.gloryTakenAmount : "Слава за успех снята");
+  },
+  "counter-stat"(btn) {
+    const foe = byId(btn.dataset.id);
+    if (!foe) return;
+    const roll = counterRoll(foe);
+    roll.stat = statKey(btn.dataset.stat);
+    roll.mine = statsOf(foe)[roll.stat];
+    saveGame();
+    render();
+  },
+  "counter-mod"(btn) {
+    const foe = byId(btn.dataset.id);
+    if (!foe) return;
+    const roll = counterRoll(foe);
+    const key = btn.dataset.key === "monster" ? "monster" : "mine";
+    roll[key] = Math.max(0, (Number(roll[key]) || 0) + Number(btn.dataset.delta));
     saveGame();
     render();
   },
