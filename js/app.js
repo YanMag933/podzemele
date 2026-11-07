@@ -735,6 +735,8 @@ function endTurn() {
   g.recover = { glory: 1, peril: 1 };
   g.fights = [];
   g.counterSeen = false;
+  g.challenge = null;
+  g.dash = null;
   state.counter = null;
 }
 function evaluate() {
@@ -1101,14 +1103,44 @@ function deedsBody() {
     ? `<p class="note">Жетон сопровождения уже на герое. Играйте следующие ходы как обычно и сбросьте его на нужной локации.</p>`
     : `<button type="button" class="btn block" data-act="escort-start">Начать сопровождение</button>`;
   return `${p.fallen ? `<p class="note">Герой лежит и не может двигаться. Очко действия уходит на подъём.</p><button type="button" class="btn gold" data-act="stand">Встать</button>` : ""}
-  <div class="row"><button type="button" class="btn" data-act="move">Перемещение −1</button><button type="button" class="btn" data-act="explore">Исследовать −1</button><button type="button" class="btn" data-act="fall">${p.fallen ? "Уже лежит" : "Упал"}</button></div>
+  <div class="row"><button type="button" class="btn" data-act="move">Перемещение −1</button><button type="button" class="btn" data-act="explore">Исследовать −1</button><button type="button" class="btn" data-act="challenge-start">Вызов −1</button><button type="button" class="btn" data-act="fall">${p.fallen ? "Уже лежит" : "Упал"}</button></div>
   ${prompt}
+  ${challengeHtml(p)}
+  ${p.level > 3 && !g.dash ? `<button type="button" class="btn block" data-act="dash-start">Быстрое перемещение</button>` : ""}
+  ${dashHtml(p)}
   <button type="button" class="btn gold block" data-act="open-card" data-id="${p.id}" data-kind="boon">Карта славы</button>
   ${escort}
   <button type="button" class="btn block" data-act="quest" data-delta="1">${win ? "Задание выполнено — победа" : "Задание выполнено"}</button>
   <p class="note">Движение, исследование, карты славы и задания можно мешать. После задания фаза подвигов продолжается. Первая попытка задания за ход не тратит действие.</p>
   ${planeToggle()}
   <p class="note">Исследование берёт карту оттуда, где герой: ${planeLabel(g.plane).toLowerCase()}, осталось ${g.decks[g.plane]}.</p>`;
+}
+function placesWord(n) {
+  const n10 = n % 10;
+  const n100 = n % 100;
+  if (n10 === 1 && n100 !== 11) return "локацию";
+  if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return "локации";
+  return "локаций";
+}
+function challengeHtml(p) {
+  const c = state.game.challenge;
+  if (!c) return "";
+  const foes = livingFoes();
+  if (!c.foeId) {
+    const picks = foes.map((f) => `<button type="button" class="tiny" data-act="challenge-foe" data-id="${f.id}">${esc(f.heroName)}</button>`).join("");
+    return `<div class="card stack"><p>Вызов</p><p class="note">Выберите героя, который стоит с вами в одной локации. Действие уже потрачено, отмена его вернёт.</p><div class="row">${picks}</div><button type="button" class="btn ghost" data-act="challenge-cancel">Отмена вызова</button></div>`;
+  }
+  const foe = byId(c.foeId);
+  if (!foe) return "";
+  const stat = statKey(c.stat);
+  const statName = statTitle(stat);
+  return `<article class="fight"><h3>Вызов: ${esc(foe.heroName)}</h3><p class="muted">Вы</p>${statBrief(p)}<p class="muted">${esc(foe.heroName)}</p>${statBrief(foe)}<div class="row">${statButtons("challenge-stat", "", stat)}</div><div class="spread"><span>У меня</span><div class="stepper"><button type="button" data-act="challenge-mod" data-key="mine" data-delta="-1">−</button><b>${c.mine}</b><button type="button" data-act="challenge-mod" data-key="mine" data-delta="1">+</button></div></div><div class="spread"><span>У соперника</span><div class="stepper"><button type="button" data-act="challenge-mod" data-key="theirs" data-delta="-1">−</button><b>${c.theirs}</b><button type="button" data-act="challenge-mod" data-key="theirs" data-delta="1">+</button></div></div><p class="compare">${compareLine(Number(c.mine) || 0, Number(c.theirs) || 0)}</p>${effectsBlock("Ваши эффекты по " + statName, effectsFor(p, stat))}${effectsBlock("Эффекты соперника по " + statName, effectsFor(foe, stat))}<div class="row"><button type="button" class="btn ${c.wound ? "gold" : ""}" data-act="challenge-hit">${c.wound ? "Рана уже есть — снять" : "Удача — +1 рана"}</button><button type="button" class="btn ${c.miss ? "gold" : ""}" data-act="challenge-miss">${c.miss ? "Неудача отмечена" : "Неудача"}</button></div><button type="button" class="btn block" data-act="challenge-close">Бой окончен</button><button type="button" class="btn ghost" data-act="challenge-cancel">Отмена вызова</button></article>`;
+}
+function dashHtml(p) {
+  const d = state.game.dash;
+  if (!d) return "";
+  const max = Math.max(0, p.ap);
+  return `<div class="card stack"><p>Быстрое перемещение</p><p class="note">Каждая локация стоит 1 действие. Сейчас хватает на ${max} ${placesWord(max)}. Слава и риск — общая сумма со всех этих локаций.</p><div class="spread"><span>Локации</span>${stepper(d.locations, "dash", 'data-key="locations"')}</div><div class="spread"><span>Слава</span>${stepper(d.glory, "dash", 'data-key="glory"')}</div><div class="spread"><span>Риск</span>${stepper(d.peril, "dash", 'data-key="peril"')}</div><button type="button" class="btn gold block" data-act="dash-go">Перейти</button><button type="button" class="btn ghost" data-act="dash-cancel">Отмена</button></div>`;
 }
 function signed(n) { n = num(n); return (n > 0 ? "+" : "") + n; }
 function escortPanel(p) {
@@ -1396,6 +1428,8 @@ const actions = {
     const phase = state.game.phase;
     ensureDecks(state.game);
     if (phase === "location" && state.game.decks[state.game.plane] <= 0) { flash("Эта колода пуста — переключите ползунок или пропустите"); return; }
+    if (phase === "deeds" && state.game.challenge && !state.game.challenge.done) { flash("Сначала закончите вызов или отмените его"); return; }
+    if (phase === "deeds") state.game.dash = null;
     if (phase === "villainy" && (state.game.fights || []).length > 0 && !state.game.counterSeen && counterFoes().length) {
       state.counter = true;
       render();
@@ -1408,7 +1442,10 @@ const actions = {
       else nextPhase();
     });
   },
-  skip() { commit(() => { if (state.game.phase === "recovery") dropTurnCards(current()); if (state.game.phase === "discard") endTurn(); else nextPhase(); }); },
+  skip() {
+    if (state.game.phase === "deeds" && state.game.challenge && !state.game.challenge.done) { flash("Сначала закончите вызов или отмените его"); return; }
+    commit(() => { if (state.game.phase === "deeds") state.game.dash = null; if (state.game.phase === "recovery") dropTurnCards(current()); if (state.game.phase === "discard") endTurn(); else nextPhase(); });
+  },
   plane(btn) {
     ensureDecks(state.game);
     state.game.plane = btn.dataset.plane === "dungeon" ? "dungeon" : "surface";
@@ -1651,6 +1688,125 @@ const actions = {
     render();
   },
   ability() { commit(() => { current().abilityUsed = !current().abilityUsed; }); },
+  "challenge-start"() {
+    const p = current();
+    if (p.fallen) { flash("Сначала встаньте"); return; }
+    if (p.ap < 1) { flash("Нет очков действия"); return; }
+    if (!livingFoes().length) { flash("Некого вызывать"); return; }
+    if (state.game.challenge) { flash("Вызов уже идёт"); return; }
+    commit(() => {
+      p.ap -= 1;
+      state.game.challenge = { foeId: "", stat: "melee", mine: statsOf(p).melee, theirs: 0, wound: false, miss: false, done: false };
+    });
+  },
+  "challenge-foe"(btn) {
+    const c = state.game.challenge;
+    const foe = byId(btn.dataset.id);
+    if (!c || !foe) return;
+    c.foeId = foe.id;
+    c.stat = "melee";
+    c.mine = statsOf(current()).melee;
+    c.theirs = statsOf(foe).melee;
+    c.wound = false;
+    c.miss = false;
+    c.done = false;
+    saveGame();
+    render();
+  },
+  "challenge-stat"(btn) {
+    const c = state.game.challenge;
+    const foe = c && byId(c.foeId);
+    if (!c || !foe) return;
+    c.stat = statKey(btn.dataset.stat);
+    c.mine = statsOf(current())[c.stat];
+    c.theirs = statsOf(foe)[c.stat];
+    saveGame();
+    render();
+  },
+  "challenge-mod"(btn) {
+    const c = state.game.challenge;
+    if (!c) return;
+    const key = btn.dataset.key === "theirs" ? "theirs" : "mine";
+    c[key] = Math.max(0, (Number(c[key]) || 0) + Number(btn.dataset.delta));
+    saveGame();
+    render();
+  },
+  "challenge-hit"() {
+    const c = state.game.challenge;
+    const foe = c && byId(c.foeId);
+    if (!c || !foe) return;
+    commit(() => {
+      if (c.wound) { foe.peril = Math.max(0, foe.peril - 1); c.wound = false; }
+      else { foe.peril += 1; c.wound = true; c.miss = false; c.done = true; }
+    });
+    flash(c.wound ? foe.heroName + ": риск +1 за рану" : "Рана снята");
+  },
+  "challenge-miss"() {
+    const c = state.game.challenge;
+    if (!c) return;
+    c.miss = !c.miss;
+    if (c.miss) c.done = true;
+    saveGame();
+    render();
+  },
+  "challenge-close"() {
+    const c = state.game.challenge;
+    if (!c || !c.foeId) { flash("Сначала выберите соперника или отмените вызов"); return; }
+    state.game.challenge = null;
+    saveGame();
+    render();
+  },
+  "challenge-cancel"() {
+    const p = current();
+    const c = state.game.challenge;
+    if (!c) return;
+    commit(() => {
+      if (c.wound) {
+        const foe = byId(c.foeId);
+        if (foe) foe.peril = Math.max(0, foe.peril - 1);
+      }
+      p.ap += 1;
+      state.game.challenge = null;
+    });
+  },
+  "dash-start"() {
+    const p = current();
+    if (p.level <= 3) return;
+    if (p.fallen) { flash("Сначала встаньте"); return; }
+    if (p.ap < 1) { flash("Нет очков действия"); return; }
+    state.game.dash = { locations: 1, glory: 0, peril: 0 };
+    saveGame();
+    render();
+  },
+  dash(btn) {
+    const p = current();
+    const d = state.game.dash;
+    if (!d) return;
+    const key = btn.dataset.key;
+    const delta = Number(btn.dataset.delta);
+    if (key === "locations") {
+      const next = d.locations + delta;
+      if (next > p.ap) { flash("Действий хватает на " + p.ap + " " + placesWord(p.ap)); return; }
+      d.locations = Math.max(1, next);
+    } else d[key] = Math.max(0, (Number(d[key]) || 0) + delta);
+    saveGame();
+    render();
+  },
+  "dash-go"() {
+    const p = current();
+    const d = state.game.dash;
+    if (!d) return;
+    if (p.fallen) { flash("Сначала встаньте"); return; }
+    if (d.locations > p.ap) { flash("Действий хватает на " + p.ap + " " + placesWord(p.ap)); return; }
+    commit(() => {
+      p.ap -= d.locations;
+      p.glory += d.glory;
+      p.peril += d.peril;
+      p.moved = true;
+      state.game.dash = null;
+    });
+  },
+  "dash-cancel"() { state.game.dash = null; saveGame(); render(); },
   move() {
     const p = current();
     if (p.fallen) { flash("Сначала встаньте"); return; }
