@@ -536,7 +536,7 @@ async function startCrop(file) {
   state.originalSrc = prepared.toDataURL("image/jpeg", 0.86);
   state.cropSize = { w: prepared.width, h: prepared.height };
   state.portrait = "";
-  state.crop = Object.assign({ src: state.originalSrc, purpose: "read" }, defaultCrop(prepared.width, prepared.height));
+  state.crop = Object.assign({ src: state.originalSrc, purpose: "show" }, portraitCrop(prepared.width, prepared.height));
   render();
 }
 function cropCanvas(img, crop) {
@@ -582,9 +582,9 @@ function screenCrop() {
   const show = c.purpose === "show";
   const preview = state.portrait ? `<p class="note">В игре уже выбран фрагмент.</p><img class="photo-frame" alt="" src="${state.portrait}">` : "";
   const tools = show
-    ? `<button type="button" class="btn gold block" data-act="crop-show">Эта область в игре</button><button type="button" class="btn block" data-act="crop-mode" data-mode="read">К распознаванию</button>`
-    : `<button type="button" class="btn gold block" data-act="crop-read">Прочитать эту область</button><button type="button" class="btn block" data-act="crop-full">Читать всё фото</button><button type="button" class="btn block" data-act="crop-mode" data-mode="show">Выбрать область для игры</button>`;
-  return `<main class="wrap stack"><h1>${show ? "Область в игре" : "Фото героя"}</h1><p class="note">${show ? "Сдвиньте рамку на фрагмент, который будет виден у героя во время партии." : "Рамка для распознавания карточки. Можно переснять фото или отдельно выбрать фрагмент, который виден в игре."}</p><div class="crop-stage" id="cropper"><img alt="" src="${c.src}"><div class="crop-rect" id="crop-rect" style="left:${c.x * 100}%;top:${c.y * 100}%;width:${c.w * 100}%;height:${c.h * 100}%"><span data-handle="nw"></span><span data-handle="ne"></span><span data-handle="sw"></span><span data-handle="se"></span></div></div>${preview}${tools}<button type="button" class="btn block" data-act="pick" data-mode="camera">Переснять</button><button type="button" class="btn ghost block" data-act="crop-cancel">Отмена</button></main>`;
+    ? `<button type="button" class="btn block" data-act="crop-mode" data-mode="read">Распознать карточку</button>`
+    : `<button type="button" class="btn block" data-act="crop-read">Прочитать эту область</button><button type="button" class="btn block" data-act="crop-full">Читать всё фото</button><button type="button" class="btn block" data-act="crop-mode" data-mode="show">Выбрать область для игры</button>`;
+  return `<main class="wrap stack"><h1>${show ? "Область в игре" : "Фото героя"}</h1><p class="note">${show ? "Сдвиньте рамку на фрагмент, который будет виден у героя во время партии. «Сохранить изменения» записывает только фото и не читает карточку." : "Эта рамка для чтения карточки. Чтобы просто заменить фото, вернитесь к области для игры и сохраните её."}</p><div class="crop-stage" id="cropper"><img alt="" src="${c.src}"><div class="crop-rect" id="crop-rect" style="left:${c.x * 100}%;top:${c.y * 100}%;width:${c.w * 100}%;height:${c.h * 100}%"><span data-handle="nw"></span><span data-handle="ne"></span><span data-handle="sw"></span><span data-handle="se"></span></div></div>${preview}<button type="button" class="btn gold block" data-act="crop-save">Сохранить изменения</button>${tools}<button type="button" class="btn block" data-act="pick" data-mode="camera">Переснять</button><button type="button" class="btn ghost block" data-act="crop-cancel">Отмена</button></main>`;
 }
 function bindCropper() {
   const stage = document.getElementById("cropper");
@@ -903,7 +903,7 @@ function screenHero() {
   const row = (label, key) => `<span>${label}</span>` + d.stats.map((s, i) => numInput(`stats.${i}.${key}`, s[key])).join("");
   const photo = d.photo ? `<img class="photo-frame" alt="Карточка героя" src="${d.photo}">` : `<div class="photo-frame" style="height:140px"></div>`;
   const busy = state.scan.busy ? `<p id="ocr-status">Читаю карточку…</p><div class="bar"><i id="ocr-bar"></i></div>` : "";
-  return `<main class="wrap stack"><button type="button" class="btn ghost" data-act="back">Назад</button><h1>${d.id ? "Герой" : "Новый герой"}</h1><p class="note">Сначала обрежьте фото по карточке. Имя сверху, справа цифры уровней, внизу здоровье и пределы.</p>${state.scan.error ? `<p class="note">${esc(state.scan.error)}</p>` : ""}${photo}${busy}<div class="row"><button type="button" class="btn" data-act="pick" data-mode="camera">Переснять</button><button type="button" class="btn ghost" data-act="pick" data-mode="file">Другой файл</button>${state.originalSrc ? `<button type="button" class="btn ghost" data-act="crop-show-open">Область в игре</button>` : ""}</div>
+  return `<main class="wrap stack"><button type="button" class="btn ghost" data-act="back">Назад</button><h1>${d.id ? "Герой" : "Новый герой"}</h1><p class="note">Пересъёмка меняет только фото. Имя и цифры остаются, пока сами не запустите распознавание.</p>${state.scan.error ? `<p class="note">${esc(state.scan.error)}</p>` : ""}${photo}${busy}<div class="row"><button type="button" class="btn" data-act="pick" data-mode="camera">Переснять</button><button type="button" class="btn ghost" data-act="pick" data-mode="file">Другой файл</button>${state.originalSrc ? `<button type="button" class="btn ghost" data-act="crop-show-open">Область в игре</button>` : ""}</div>
   <label class="field">Имя<input data-bind="draft.name" value="${esc(d.name)}"></label>
   <label class="field">Раса и класс<input data-bind="draft.race" value="${esc(d.race)}"></label>
   <label class="field">Набор<input data-bind="draft.setName" value="${esc(d.setName)}" placeholder="Пустыня, Ледяная ведьма…"></label>
@@ -1937,13 +1937,32 @@ const actions = {
     Object.assign(c, saved || fresh, { purpose: next });
     render();
   },
-  async "crop-show"() {
-    if (!state.originalSrc || !state.crop) return;
+  async "crop-save"() {
+    if (!state.originalSrc || !state.crop || !state.draft) return;
     const img = await loadSrc(state.originalSrc);
-    const shot = drawImage(cropCanvas(img, state.crop), 420, false).toDataURL("image/jpeg", 0.72);
+    const use = state.crop.purpose === "read" && state.portrait ? null : state.crop;
+    const shot = use
+      ? drawImage(cropCanvas(img, use), 420, false).toDataURL("image/jpeg", 0.72)
+      : state.portrait;
     state.portrait = shot;
-    if (state.draft) state.draft.photo = shot;
-    flash("В игре будет виден этот фрагмент");
+    state.draft.photo = shot;
+    state.crop = null;
+    const d = state.draft;
+    if (d.id && !draftErrors(d).length) {
+      await saveHero({
+        id: d.id, name: d.name.trim(), race: d.race.trim(), setName: (d.setName || "").trim(), ability: (d.ability || "").trim(),
+        health: Number(d.health), boonLimit: Number(d.boonLimit), treasureLimit: Number(d.treasureLimit),
+        stats: d.stats.map((r) => ({ melee: Number(r.melee), magic: Number(r.magic), speed: Number(r.speed) })),
+        photo: shot, ocrText: d.ocrText || "", updatedAt: Date.now(),
+      });
+      state.heroes = await listHeroes();
+      if (state.game) {
+        let changed = false;
+        state.game.players.forEach((p) => { if (p.heroId === d.id) { p.photo = shot; changed = true; } });
+        if (changed) saveGame();
+      }
+      flash("Фото обновлено. Карточку не читал.");
+    } else flash("Фото поставлено. Карточку не читал.");
     render();
   },
   "crop-show-open"() { openCrop("show"); },
