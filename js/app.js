@@ -531,7 +531,6 @@ function addQuest(delta) {
   const bits = ["Задание засчитано"];
   if (info === null) bits.push("уровень уже максимальный");
   else if (info) bits.push(info);
-  if (state.game.phase === "deeds" && p.quests < state.settings.questsToWin) state.game.phase = "discard";
   state.reward = { health: 0, peril: 0, glory: 0, melee: 0 };
   flash(bits.join(". "));
 }
@@ -802,7 +801,7 @@ function deedsBody() {
   ${prompt}
   <button type="button" class="btn gold block" data-act="open-card" data-id="${p.id}" data-kind="boon">Карта славы</button>
   <button type="button" class="btn block" data-act="quest" data-delta="1">${win ? "Задание выполнено — победа" : "Задание выполнено"}</button>
-  <p class="note">Движение, исследование, карты славы и задания можно мешать. Успешное задание сразу закрывает фазу. Первая попытка задания за ход не тратит действие.</p>
+  <p class="note">Движение, исследование, карты славы и задания можно мешать. После задания фаза подвигов продолжается. Первая попытка задания за ход не тратит действие.</p>
   ${planeToggle()}
   <p class="note">Исследование берёт карту оттуда, где герой: ${planeLabel(g.plane).toLowerCase()}, осталось ${g.decks[g.plane]}.</p>`;
 }
