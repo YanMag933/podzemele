@@ -440,6 +440,14 @@ function defaultCrop(w, h) {
   }
   return { x: 0.04, y: 0.04, w: 0.92, h: 0.92 };
 }
+function portraitCrop(w, h) {
+  const aspect = w / h;
+  if (aspect > 0.9) {
+    const cw = Math.min(0.42, (0.7 * h) / w);
+    return { x: 0.08, y: 0.12, w: cw, h: 0.72 };
+  }
+  return { x: 0.08, y: 0.1, w: 0.5, h: 0.62 };
+}
 function sliceCanvas(source, fx, fy, fw, fh, scale) {
   const sw = source.width;
   const sh = source.height;
@@ -527,7 +535,8 @@ async function startCrop(file) {
   const prepared = drawImage(img, 1600, false);
   state.originalSrc = prepared.toDataURL("image/jpeg", 0.86);
   state.cropSize = { w: prepared.width, h: prepared.height };
-  state.crop = Object.assign({ src: state.originalSrc }, defaultCrop(prepared.width, prepared.height));
+  state.portrait = "";
+  state.crop = Object.assign({ src: state.originalSrc, purpose: "read" }, defaultCrop(prepared.width, prepared.height));
   render();
 }
 function cropCanvas(img, crop) {
@@ -542,14 +551,14 @@ function cropCanvas(img, crop) {
   return canvas;
 }
 async function readPrepared(canvas) {
-  state.draft.photo = drawImage(canvas, 420, false).toDataURL("image/jpeg", 0.72);
+  if (!state.portrait) state.draft.photo = drawImage(canvas, 420, false).toDataURL("image/jpeg", 0.72);
   state.crop = null;
   state.scan.busy = true;
   state.scan.error = "";
   render();
   try {
     const parsed = await recognizeCard(canvas);
-    parsed.photo = state.draft.photo;
+    parsed.photo = state.portrait || state.draft.photo;
     parsed.id = state.draft.id;
     parsed.setName = state.draft.setName;
     state.draft = parsed;
@@ -561,9 +570,21 @@ async function readPrepared(canvas) {
   state.scan.busy = false;
   render();
 }
+function openCrop(purpose) {
+  if (!state.originalSrc || !state.cropSize) return;
+  const mode = purpose === "show" ? "show" : "read";
+  const box = mode === "show" ? portraitCrop(state.cropSize.w, state.cropSize.h) : defaultCrop(state.cropSize.w, state.cropSize.h);
+  state.crop = Object.assign({ src: state.originalSrc, purpose: mode }, box);
+  render();
+}
 function screenCrop() {
   const c = state.crop;
-  return `<main class="wrap stack"><h1>Обрезать карточку</h1><p class="note">Сдвиньте рамку так, чтобы внутри была сама карточка: имя сверху, три ряда цифр справа, здоровье и пределы внизу.</p><div class="crop-stage" id="cropper"><img alt="" src="${c.src}"><div class="crop-rect" id="crop-rect" style="left:${c.x * 100}%;top:${c.y * 100}%;width:${c.w * 100}%;height:${c.h * 100}%"><span data-handle="nw"></span><span data-handle="ne"></span><span data-handle="sw"></span><span data-handle="se"></span></div></div><button type="button" class="btn gold block" data-act="crop-read">Прочитать эту область</button><button type="button" class="btn block" data-act="crop-full">Читать всё фото</button><button type="button" class="btn ghost block" data-act="crop-cancel">Отмена</button></main>`;
+  const show = c.purpose === "show";
+  const preview = state.portrait ? `<p class="note">В игре уже выбран фрагмент.</p><img class="photo-frame" alt="" src="${state.portrait}">` : "";
+  const tools = show
+    ? `<button type="button" class="btn gold block" data-act="crop-show">Эта область в игре</button><button type="button" class="btn block" data-act="crop-mode" data-mode="read">К распознаванию</button>`
+    : `<button type="button" class="btn gold block" data-act="crop-read">Прочитать эту область</button><button type="button" class="btn block" data-act="crop-full">Читать всё фото</button><button type="button" class="btn block" data-act="crop-mode" data-mode="show">Выбрать область для игры</button>`;
+  return `<main class="wrap stack"><h1>${show ? "Область в игре" : "Фото героя"}</h1><p class="note">${show ? "Сдвиньте рамку на фрагмент, который будет виден у героя во время партии." : "Рамка для распознавания карточки. Можно переснять фото или отдельно выбрать фрагмент, который виден в игре."}</p><div class="crop-stage" id="cropper"><img alt="" src="${c.src}"><div class="crop-rect" id="crop-rect" style="left:${c.x * 100}%;top:${c.y * 100}%;width:${c.w * 100}%;height:${c.h * 100}%"><span data-handle="nw"></span><span data-handle="ne"></span><span data-handle="sw"></span><span data-handle="se"></span></div></div>${preview}${tools}<button type="button" class="btn block" data-act="pick" data-mode="camera">Переснять</button><button type="button" class="btn ghost block" data-act="crop-cancel">Отмена</button></main>`;
 }
 function bindCropper() {
   const stage = document.getElementById("cropper");
@@ -601,8 +622,8 @@ function bindCropper() {
     if (drag.mode === "nw") { x += dx; y += dy; w -= dx; h -= dy; }
     if (drag.mode === "ne") { y += dy; w += dx; h -= dy; }
     if (drag.mode === "sw") { x += dx; w -= dx; h += dy; }
-    w = Math.max(0.2, w);
-    h = Math.max(0.2, h);
+    w = Math.max(0.12, w);
+    h = Math.max(0.12, h);
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x + w > 1) x = 1 - w;
@@ -882,7 +903,7 @@ function screenHero() {
   const row = (label, key) => `<span>${label}</span>` + d.stats.map((s, i) => numInput(`stats.${i}.${key}`, s[key])).join("");
   const photo = d.photo ? `<img class="photo-frame" alt="Карточка героя" src="${d.photo}">` : `<div class="photo-frame" style="height:140px"></div>`;
   const busy = state.scan.busy ? `<p id="ocr-status">Читаю карточку…</p><div class="bar"><i id="ocr-bar"></i></div>` : "";
-  return `<main class="wrap stack"><button type="button" class="btn ghost" data-act="back">Назад</button><h1>${d.id ? "Герой" : "Новый герой"}</h1><p class="note">Сначала обрежьте фото по карточке. Имя сверху, справа цифры уровней, внизу здоровье и пределы.</p>${state.scan.error ? `<p class="note">${esc(state.scan.error)}</p>` : ""}${photo}${busy}<div class="row"><button type="button" class="btn" data-act="pick" data-mode="camera">Переснять</button><button type="button" class="btn ghost" data-act="pick" data-mode="file">Другой файл</button>${state.originalSrc ? `<button type="button" class="btn ghost" data-act="crop-again">Обрезать</button>` : ""}</div>
+  return `<main class="wrap stack"><button type="button" class="btn ghost" data-act="back">Назад</button><h1>${d.id ? "Герой" : "Новый герой"}</h1><p class="note">Сначала обрежьте фото по карточке. Имя сверху, справа цифры уровней, внизу здоровье и пределы.</p>${state.scan.error ? `<p class="note">${esc(state.scan.error)}</p>` : ""}${photo}${busy}<div class="row"><button type="button" class="btn" data-act="pick" data-mode="camera">Переснять</button><button type="button" class="btn ghost" data-act="pick" data-mode="file">Другой файл</button>${state.originalSrc ? `<button type="button" class="btn ghost" data-act="crop-show-open">Область в игре</button>` : ""}</div>
   <label class="field">Имя<input data-bind="draft.name" value="${esc(d.name)}"></label>
   <label class="field">Раса и класс<input data-bind="draft.race" value="${esc(d.race)}"></label>
   <label class="field">Набор<input data-bind="draft.setName" value="${esc(d.setName)}" placeholder="Пустыня, Ледяная ведьма…"></label>
@@ -1906,11 +1927,27 @@ const actions = {
     await readPrepared(drawImage(img, 1600, false));
   },
   "crop-cancel"() { state.crop = null; render(); },
-  "crop-again"() {
-    if (!state.originalSrc || !state.cropSize) return;
-    state.crop = Object.assign({ src: state.originalSrc }, defaultCrop(state.cropSize.w, state.cropSize.h));
+  "crop-mode"(btn) {
+    const c = state.crop;
+    if (!c || !state.cropSize) return;
+    const next = btn.dataset.mode === "show" ? "show" : "read";
+    c[c.purpose === "show" ? "showBox" : "readBox"] = { x: c.x, y: c.y, w: c.w, h: c.h };
+    const saved = next === "show" ? c.showBox : c.readBox;
+    const fresh = next === "show" ? portraitCrop(state.cropSize.w, state.cropSize.h) : defaultCrop(state.cropSize.w, state.cropSize.h);
+    Object.assign(c, saved || fresh, { purpose: next });
     render();
   },
+  async "crop-show"() {
+    if (!state.originalSrc || !state.crop) return;
+    const img = await loadSrc(state.originalSrc);
+    const shot = drawImage(cropCanvas(img, state.crop), 420, false).toDataURL("image/jpeg", 0.72);
+    state.portrait = shot;
+    if (state.draft) state.draft.photo = shot;
+    flash("В игре будет виден этот фрагмент");
+    render();
+  },
+  "crop-show-open"() { openCrop("show"); },
+  "crop-again"() { openCrop("read"); },
   async "refresh-app"() {
     try {
       if ("caches" in window) {
