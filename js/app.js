@@ -1039,7 +1039,7 @@ function fightHtml() {
     const speedGlory = stat === "speed"
       ? `<div class="spread"><span>Слава за успех</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="glory" data-delta="-1">−</button><b>${f.glory || 0}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="glory" data-delta="1">+</button></div></div><button type="button" class="btn ${f.gloryTaken ? "" : "gold"}" data-act="fight-success" data-i="${i}">${f.gloryTaken ? "Слава уже взята — отменить" : "Успех — слава +" + (f.glory || 0)}</button>`
       : "";
-    return `<article class="fight"><h3>Бой ${i + 1}</h3>${picks}<p class="muted">Вы</p>${statBrief(me)}<p class="muted">Соперник</p>${statBrief(foe)}<div class="row">${statButtons("fight-stat", `data-i="${i}"`, stat)}</div><div class="spread"><span>У меня</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="-1">−</button><b>${f.mine}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="1">+</button></div></div><div class="spread"><span>У соперника</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="-1">−</button><b>${f.theirs}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="1">+</button></div></div><p class="compare">${compareLine(Number(f.mine) || 0, Number(f.theirs) || 0)}</p>${speedGlory}<button type="button" class="btn ${f.wound ? "" : "gold"}" data-act="fight-wound" data-i="${i}">${f.wound ? "Рана уже есть — снять риск" : "Рана — +1 риск сопернику"}</button>${effectsBlock("Ваши эффекты по " + statName, effectsFor(me, stat))}${effectsBlock("Эффекты соперника по " + statName, effectsFor(foe, stat))}</article>`;
+    return `<article class="fight"><h3>Бой ${i + 1}</h3>${picks}<p class="muted">Статы того, кого атакуют</p>${statBrief(foe)}<div class="row">${statButtons("fight-stat", `data-i="${i}"`, stat)}</div><div class="spread"><span>У меня</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="-1">−</button><b>${f.mine}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="1">+</button></div></div><div class="spread"><span>У соперника</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="-1">−</button><b>${f.theirs}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="1">+</button></div></div><p class="compare">${compareLine(Number(f.mine) || 0, Number(f.theirs) || 0)}</p>${speedGlory}<div class="row"><button type="button" class="btn ${f.wound ? "gold" : ""}" data-act="fight-wound" data-i="${i}">${f.wound ? "Рана уже есть — снять риск" : "Рана — +1 риск"}</button><button type="button" class="btn ${f.miss ? "gold" : ""}" data-act="fight-miss" data-i="${i}">${f.miss ? "Неудача отмечена" : "Неудача"}</button></div>${effectsBlock("Ваши эффекты по " + statName, effectsFor(me, stat))}${effectsBlock("Эффекты соперника по " + statName, effectsFor(foe, stat))}</article>`;
   }).join("");
   const played = g.fights.length ? `<button type="button" class="btn gold block" data-act="cards-played">Карты злодеяний отыграны</button><p class="note">После этого, если у соперника сохранено действие, откроется контратака.</p>` : "";
   return `<div class="stack"><h3>Карты злодеяний</h3>${stepper(g.fights.length, "fight-count")}<p class="note">Сколько карт разыгрываете. По каждой — своё сравнение: выберите характеристику и поправьте числа после кубиков.</p>${rows}${played}</div>`;
@@ -1566,6 +1566,13 @@ const actions = {
       else { foe.peril += 1; f.wound = true; }
     });
     flash(f.wound ? foe.heroName + ": риск +1 за рану" : "Риск за рану снят");
+  },
+  "fight-miss"(btn) {
+    const f = (state.game.fights || [])[Number(btn.dataset.i)];
+    if (!f) return;
+    f.miss = !f.miss;
+    saveGame();
+    render();
   },
   "fight-success"(btn) {
     const f = (state.game.fights || [])[Number(btn.dataset.i)];
