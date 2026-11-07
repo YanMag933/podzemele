@@ -1,0 +1,1024 @@
+/* Счётчик хода для «Подземелья». Герои читаются с фото, в коде их нет. */
+const PHASES = [
+  ["recovery", "Восст."],
+  ["villainy", "Злодеяния"],
+  ["location", "Локации"],
+  ["deeds", "Подвиги"],
+  ["discard", "Сброс"],
+];
+const SETTINGS_KEY = "dungeoneer-settings";
+const GAME_KEY = "dungeoneer-game";
+
+const state = {
+  screen: "home",
+  back: "home",
+  heroes: [],
+  settings: null,
+  game: null,
+  history: [],
+  draft: null,
+  scan: { busy: false, error: "" },
+  setup: null,
+  modal: null,
+  sheetId: null,
+  menu: false,
+  toast: "",
+  confirm: null,
+  die: null,
+};
+
+const app = document.getElementById("app");
+let dbPromise = null;
+let workerPromise = null;
+let toastTimer = 0;
+
+function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+function uid() { return crypto.randomUUID(); }
+function flash(text) {
+  state.toast = text;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { state.toast = ""; render(); }, 3200);
+  render();
+}
+function go(screen) { state.screen = screen; render(true); }
+function render(reset) {
+  const y = reset ? 0 : (document.scrollingElement ? document.scrollingElement.scrollTop : 0);
+  app.innerHTML = view() + toastHtml() + confirmHtml();
+  if (document.scrollingElement) document.scrollingElement.scrollTop = y;
+}
+
+function loadSettings() {
+  const d = { questsToWin: 3, maxLevel: 4, healthOnLevel: false, sets: 1, surfacePerSet: 17, dungeonPerSet: 0 };
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null") || {}; } catch (e) { saved = {}; }
+  Object.assign(d, saved);
+  if (saved.surfacePerSet == null && saved.startLocations != null) d.surfacePerSet = saved.startLocations;
+  d.questsToWin = clamp(Number(d.questsToWin) || 3, 1, 12);
+  d.maxLevel = clamp(Number(d.maxLevel) || 4, 4, 20);
+  d.healthOnLevel = !!d.healthOnLevel;
+  d.sets = clamp(Number(d.sets) || 1, 1, 2);
+  d.surfacePerSet = clamp(Number(d.surfacePerSet) || 0, 0, 80);
+  d.dungeonPerSet = clamp(Number(d.dungeonPerSet) || 0, 0, 80);
+  return d;
+}
+function deckTotals(s) {
+  return { surface: s.surfacePerSet * s.sets, dungeon: s.dungeonPerSet * s.sets };
+}
+function planeLabel(id) { return id === "dungeon" ? "Подземелье" : "Поверхность"; }
+function ensureDecks(g) {
+  if (!g.decks) {
+    const left = Number(g.locationsLeft);
+    g.decks = { surface: Number.isFinite(left) ? Math.max(0, left) : deckTotals(state.settings).surface, dungeon: 0 };
+  }
+  g.decks.surface = Math.max(0, Number(g.decks.surface) || 0);
+  g.decks.dungeon = Math.max(0, Number(g.decks.dungeon) || 0);
+  g.plane = g.plane === "dungeon" ? "dungeon" : "surface";
+  g.locationsLeft = g.decks.surface + g.decks.dungeon;
+}
+function drawLocation(g) {
+  ensureDecks(g);
+  if (g.decks[g.plane] <= 0) return false;
+  g.decks[g.plane] -= 1;
+  g.locationsLeft = g.decks.surface + g.decks.dungeon;
+  return true;
+}
+function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings)); }
+function loadGame() {
+  try {
+    const g = JSON.parse(localStorage.getItem(GAME_KEY) || "null");
+    if (!g || !Array.isArray(g.players)) return null;
+    g.stay = g.stay || { glory: 0, peril: 0 };
+    g.pay = g.pay || {};
+    ensureDecks(g);
+    return g;
+  } catch (e) { return null; }
+}
+function saveGame() {
+  if (state.game) localStorage.setItem(GAME_KEY, JSON.stringify(state.game));
+  else localStorage.removeItem(GAME_KEY);
+}
+
+function db() {
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open("dungeoneer", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("heroes", { keyPath: "id" });
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => { dbPromise = null; reject(req.error); };
+    });
+  }
+  return dbPromise;
+}
+async function listHeroes() {
+  const base = await db();
+  return new Promise((resolve, reject) => {
+    const req = base.transaction("heroes", "readonly").objectStore("heroes").getAll();
+    req.onsuccess = () => resolve(req.result.sort((a, b) => a.name.localeCompare(b.name, "ru")));
+    req.onerror = () => reject(req.error);
+  });
+}
+async function saveHero(hero) {
+  const base = await db();
+  await new Promise((resolve, reject) => {
+    const tx = base.transaction("heroes", "readwrite");
+    tx.objectStore("heroes").put(hero);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function deleteHero(id) {
+  const base = await db();
+  await new Promise((resolve, reject) => {
+    const tx = base.transaction("heroes", "readwrite");
+    tx.objectStore("heroes").delete(id);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function emptyDraft() {
+  return {
+    id: null, name: "", race: "", setName: "", ability: "",
+    health: null, boonLimit: null, treasureLimit: null,
+    stats: [0, 1, 2, 3].map(() => ({ melee: null, magic: null, speed: null })),
+    photo: "", ocrText: "",
+  };
+}
+function draftFromHero(h) {
+  return {
+    id: h.id, name: h.name, race: h.race || "", setName: h.setName || "", ability: h.ability || "",
+    health: h.health, boonLimit: h.boonLimit, treasureLimit: h.treasureLimit,
+    stats: h.stats.map((r) => ({ ...r })), photo: h.photo || "", ocrText: h.ocrText || "",
+  };
+}
+function findNum(text, label) {
+  const a = new RegExp(label + "\\S{0,16}\\D{0,16}(\\d{1,2})", "i").exec(text);
+  const b = new RegExp("(\\d{1,2})\\D{0,12}" + label, "i").exec(text);
+  const m = a || b;
+  return m ? Number(m[1]) : null;
+}
+function parseHeroText(raw) {
+  const text = String(raw || "").replace(/\r/g, "");
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const draft = emptyDraft();
+  draft.ocrText = text.trim();
+  const flat = lines.join("\n");
+  draft.health = findNum(flat, "здоров") ?? findNum(flat, "жизн") ?? findNum(flat, "life");
+  draft.boonLimit = findNum(flat, "преимущ") ?? findNum(flat, "boon");
+  draft.treasureLimit = findNum(flat, "сокровищ") ?? findNum(flat, "treasure");
+  const quads = [];
+  for (const line of lines) {
+    const nums = (line.match(/\d+/g) || []).map(Number);
+    if (nums.length < 4) continue;
+    const low = line.toLowerCase();
+    let kind = null;
+    if (/ближ|melee/.test(low)) kind = "melee";
+    else if (/маги|magic/.test(low)) kind = "magic";
+    else if (/скор|speed|move/.test(low)) kind = "speed";
+    else if (/уров|level/.test(low)) kind = "level";
+    quads.push({ kind, four: nums.slice(-4) });
+  }
+  const byKind = {};
+  quads.forEach((q) => { if (q.kind && q.kind !== "level") byKind[q.kind] = q.four; });
+  let rows = null;
+  if (byKind.melee && byKind.magic && byKind.speed) rows = [byKind.melee, byKind.magic, byKind.speed];
+  else {
+    rows = quads.filter((q) => q.kind !== "level").map((q) => q.four);
+    if (rows.length && rows[0].join() === "1,2,3,4") rows = rows.slice(1);
+  }
+  if (rows && rows.length >= 3) {
+    for (let i = 0; i < 4; i++) draft.stats[i] = { melee: rows[0][i], magic: rows[1][i], speed: rows[2][i] };
+  }
+  const skip = /здоров|жизн|преимущ|сокровищ|ближ|маги|скор|уров|life|boon|treasure|melee|magic|speed|особ|умен/i;
+  const words = lines.filter((l) => /[A-Za-zА-Яа-яЁё]/.test(l) && !skip.test(l) && (l.match(/\d/g) || []).length < 3);
+  draft.name = words[0] || "";
+  draft.race = words[1] && words[1].length <= 48 ? words[1] : "";
+  draft.ability = words.slice(draft.race ? 2 : 1).join(" ").slice(0, 600);
+  return draft;
+}
+function draftErrors(d) {
+  const bad = [];
+  if (!String(d.name || "").trim()) bad.push("имя");
+  if (d.health == null || Number.isNaN(Number(d.health)) || Number(d.health) < 1) bad.push("здоровье");
+  if (d.boonLimit == null || Number.isNaN(Number(d.boonLimit))) bad.push("предел преимуществ");
+  if (d.treasureLimit == null || Number.isNaN(Number(d.treasureLimit))) bad.push("предел сокровищ");
+  d.stats.forEach((row, i) => {
+    if (["melee", "magic", "speed"].some((k) => row[k] == null || Number.isNaN(Number(row[k])))) bad.push("цифры " + (i + 1) + "-го уровня");
+  });
+  return bad;
+}
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("image")); };
+    img.src = url;
+  });
+}
+function drawImage(img, max, contrast) {
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(img.width * scale));
+  canvas.height = Math.max(1, Math.round(img.height * scale));
+  const g = canvas.getContext("2d", { willReadFrequently: true });
+  g.drawImage(img, 0, 0, canvas.width, canvas.height);
+  if (contrast) {
+    const image = g.getImageData(0, 0, canvas.width, canvas.height);
+    const d = image.data;
+    for (let i = 0; i < d.length; i += 4) {
+      let y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      y = (y - 128) * 1.25 + 128;
+      d[i] = d[i + 1] = d[i + 2] = y < 0 ? 0 : y > 255 ? 255 : y;
+    }
+    g.putImageData(image, 0, 0);
+  }
+  return canvas;
+}
+function ocrStatus(m) {
+  const el = document.getElementById("ocr-status");
+  const bar = document.getElementById("ocr-bar");
+  const map = {
+    "loading tesseract core": "Загружаю распознавание",
+    "initializing tesseract": "Готовлю чтение",
+    "loading language traineddata": "Загружаю русский язык",
+    "initializing api": "Почти готово",
+    "recognizing text": "Читаю карточку",
+  };
+  const label = map[m.status] || "Распознаю";
+  const pct = m.progress ? Math.round(m.progress * 100) : 0;
+  if (el) el.textContent = pct ? label + " " + pct + "%" : label + "…";
+  if (bar) bar.style.width = (m.status === "recognizing text" ? pct : 15) + "%";
+}
+async function getWorker() {
+  if (!window.Tesseract) throw new Error("no-engine");
+  if (!workerPromise) {
+    const root = new URL("vendor/", location.href);
+    workerPromise = Tesseract.createWorker("rus", 1, {
+      workerPath: new URL("worker.min.js", root).href,
+      corePath: new URL("tesseract-core-simd-lstm.wasm.js", root).href,
+      langPath: new URL("lang", root).href,
+      workerBlobURL: false,
+      logger: ocrStatus,
+    }).then(async (worker) => {
+      await worker.setParameters({ tessedit_pageseg_mode: "6" });
+      return worker;
+    }).catch((err) => { workerPromise = null; throw err; });
+  }
+  return workerPromise;
+}
+async function onPhoto(file) {
+  let img;
+  try { img = await loadImage(file); } catch (e) { flash("Этот снимок не открылся. Нужен JPEG или PNG."); return; }
+  state.draft.photo = drawImage(img, 420, false).toDataURL("image/jpeg", 0.72);
+  state.scan.busy = true;
+  state.scan.error = "";
+  render();
+  try {
+    const worker = await getWorker();
+    const result = await worker.recognize(drawImage(img, 1600, true));
+    const parsed = parseHeroText(result.data.text || "");
+    parsed.photo = state.draft.photo;
+    parsed.id = state.draft.id;
+    parsed.setName = state.draft.setName;
+    state.draft = parsed;
+  } catch (e) {
+    state.scan.error = location.protocol === "file:"
+      ? "Откройте счётчик файлом «Открыть счётчик». Сейчас заполните карточку вручную."
+      : "Не удалось прочитать фото. Заполните цифры с карточки.";
+  }
+  state.scan.busy = false;
+  render();
+}
+
+function current() { return state.game.players[state.game.active]; }
+function byId(id) { return state.game.players.find((p) => p.id === id); }
+function printed(p) {
+  const row = p.cardStats[Math.min(p.level, 4) - 1];
+  const extra = Math.max(0, p.level - 4);
+  return { melee: row.melee + extra, magic: row.magic + extra, speed: row.speed + extra, extra, row };
+}
+function itemMods(p) {
+  return p.cards.reduce((m, c) => ({
+    melee: m.melee + (c.melee || 0), magic: m.magic + (c.magic || 0), speed: m.speed + (c.speed || 0),
+  }), { melee: 0, magic: 0, speed: 0 });
+}
+function statsOf(p) {
+  const base = printed(p);
+  const mod = itemMods(p);
+  return {
+    melee: base.melee + mod.melee, magic: base.magic + mod.magic, speed: base.speed + mod.speed,
+    extra: base.extra, base, mod,
+  };
+}
+function limitsOf(p, extra) {
+  let boon = p.baseBoon, treasure = p.baseTreasure;
+  p.cards.forEach((c) => { boon += c.boonLimit || 0; treasure += c.treasureLimit || 0; });
+  if (extra) { boon += extra.boonLimit || 0; treasure += extra.treasureLimit || 0; }
+  return { boon, treasure };
+}
+function countKind(p, kind) {
+  return p.cards.filter((c) => c.kind === kind && c.until === "permanent").length;
+}
+function changeLevel(p, delta) {
+  const cap = state.settings.maxLevel;
+  const next = clamp(p.level + delta, 1, cap);
+  const diff = next - p.level;
+  if (!diff) return null;
+  const was = p.level;
+  p.level = next;
+  if (state.settings.healthOnLevel && diff > 0) {
+    p.healthMax += diff;
+    p.health += diff;
+  } else if (state.settings.healthOnLevel && diff < 0) {
+    p.healthMax = Math.max(1, p.healthMax + diff);
+    if (p.health > p.healthMax) p.health = p.healthMax;
+  }
+  const extraNow = Math.max(0, next - 4);
+  const extraWas = Math.max(0, was - 4);
+  const bits = [];
+  if (extraNow !== extraWas) {
+    bits.push(extraNow ? "сверх 4-го уровня +" + extraNow + " ко всем характеристикам" : "характеристики снова как на 4-м уровне карточки");
+  }
+  if (state.settings.healthOnLevel) bits.push(diff > 0 ? "здоровье +" + diff : "максимум здоровья " + diff);
+  return bits.join(", ");
+}
+function removeCard(p, id) {
+  const card = p.cards.find((c) => c.id === id);
+  if (!card) return;
+  p.cards = p.cards.filter((c) => c.id !== id);
+  if (card.healthMax) {
+    p.healthMax = Math.max(1, p.healthMax - card.healthMax);
+    if (p.health > p.healthMax) p.health = p.healthMax;
+  }
+}
+function applyRecovery() {
+  const p = current();
+  p.cards.filter((c) => c.until === "turn").forEach((c) => removeCard(p, c.id));
+  p.ap = Math.max(0, statsOf(p).speed);
+  p.savedAp = 0;
+  p.moved = false;
+  p.stayTaken = false;
+  p.abilityUsed = false;
+  nextPhase();
+}
+function nextPhase() {
+  const ids = PHASES.map((x) => x[0]);
+  const i = ids.indexOf(state.game.phase);
+  if (i >= 0 && i < ids.length - 1) state.game.phase = ids[i + 1];
+  state.game.prompt = null;
+}
+function endTurn() {
+  const g = state.game;
+  const p = current();
+  if (g.saveAp && p.ap > 0) p.savedAp = 1;
+  p.ap = 0;
+  p.moved = false;
+  p.stayTaken = false;
+  g.prompt = null;
+  g.saveAp = false;
+  const n = g.players.length;
+  let i = g.active;
+  for (let s = 1; s <= n; s++) {
+    const j = (g.active + s) % n;
+    if (!g.players[j].eliminated) { i = j; break; }
+  }
+  if (i <= g.active) g.round += 1;
+  g.active = i;
+  g.phase = "recovery";
+}
+function evaluate() {
+  const g = state.game;
+  if (!g) return;
+  g.players.forEach((p) => {
+    if (p.health <= 0) { p.health = 0; p.eliminated = true; }
+    else p.eliminated = false;
+  });
+  const living = g.players.filter((p) => !p.eliminated);
+  const questWinner = g.players.find((p) => !p.eliminated && p.quests >= state.settings.questsToWin);
+  if (questWinner) g.victory = { id: questWinner.id, reason: "quests" };
+  else if (g.players.some((p) => p.eliminated) && living.length === 1) g.victory = { id: living[0].id, reason: "last" };
+  else {
+    g.victory = null;
+    if (g.players[g.active].eliminated && living.length) {
+      const n = g.players.length;
+      for (let s = 1; s <= n; s++) {
+        const j = (g.active + s) % n;
+        if (!g.players[j].eliminated) {
+          if (j <= g.active) g.round += 1;
+          g.active = j;
+          g.phase = "recovery";
+          g.prompt = null;
+          break;
+        }
+      }
+    }
+  }
+}
+function settle() { evaluate(); saveGame(); render(); }
+function commit(fn) {
+  state.history.push(JSON.parse(JSON.stringify(state.game)));
+  if (state.history.length > 40) state.history.shift();
+  fn();
+  settle();
+}
+function addQuest(delta) {
+  const p = current();
+  if (delta < 0) {
+    if (p.quests <= 0) return;
+    p.quests -= 1;
+    const info = changeLevel(p, -1);
+    flash(info ? "Задание снято. " + info : "Задание снято");
+    return;
+  }
+  p.quests += 1;
+  const info = changeLevel(p, 1);
+  const bits = ["Задание засчитано"];
+  if (info === null) bits.push("уровень уже максимальный");
+  else if (info) bits.push(info);
+  if (state.game.phase === "deeds" && p.quests < state.settings.questsToWin) state.game.phase = "discard";
+  flash(bits.join(". "));
+}
+
+function face(photo, name, cls) {
+  if (photo && String(photo).startsWith("data:image/")) return `<img class="${cls}" alt="" src="${photo}">`;
+  return `<span class="${cls}">${esc((name || "?").trim().slice(0, 1).toUpperCase())}</span>`;
+}
+function stepper(value, act, extra) {
+  return `<div class="stepper"><button type="button" data-act="${act}" data-delta="-1" ${extra || ""}>−</button><b>${value}</b><button type="button" data-act="${act}" data-delta="1" ${extra || ""}>+</button></div>`;
+}
+function toastHtml() { return state.toast ? `<div class="toast" role="status">${esc(state.toast)}</div>` : ""; }
+function confirmHtml() {
+  if (!state.confirm) return "";
+  return `<div class="confirm"><div class="stack"><p>${esc(state.confirm.text)}</p><div class="row"><button type="button" class="btn gold" data-act="confirm-yes">${esc(state.confirm.yes || "Да")}</button><button type="button" class="btn ghost" data-act="confirm-no">Отмена</button></div></div></div>`;
+}
+function rulesLine() {
+  const s = state.settings;
+  const decks = deckTotals(s);
+  return `Победа: ${s.questsToWin} заданий · уровень до ${s.maxLevel} · здоровье за уровень ${s.healthOnLevel ? "включено" : "выключено"} · поверхность ${decks.surface} · подземелье ${decks.dungeon}`;
+}
+function levelPreview() {
+  const cap = state.settings.maxLevel;
+  if (cap <= 4) return `<p class="note">Потолок 4 — как четыре столбца на карточке. Поднимите его, если герой растёт дальше: каждый следующий уровень даёт +1 к ближнему бою, магии и скорости поверх 4-го столбца.</p>`;
+  const items = [];
+  for (let lvl = 4; lvl <= cap && items.length < 8; lvl++) {
+    const extra = lvl - 4;
+    items.push(`<li>${lvl} ур. ${extra ? "+" + extra : "с карточки"}</li>`);
+  }
+  if (cap > 11) items.push(`<li>${cap} ур. +${cap - 4}</li>`);
+  return `<p class="note">С 5-го уровня к цифре 4-го столбца прибавляется 1 за каждый шаг, ко всем трём характеристикам.</p><ul class="preview">${items.join("")}</ul>`;
+}
+function statHint(p, key) {
+  const st = statsOf(p);
+  const bits = [];
+  if (st.extra) bits.push("4-й +" + st.extra);
+  if (st.mod[key]) bits.push("вещи " + (st.mod[key] > 0 ? "+" : "") + st.mod[key]);
+  return bits.join(" · ");
+}
+
+function view() {
+  if (!state.settings) return "";
+  if (state.screen === "settings") return screenSettings();
+  if (state.screen === "library") return screenLibrary();
+  if (state.screen === "hero") return screenHero();
+  if (state.screen === "setup") return screenSetup();
+  if (state.screen === "play" && state.game) return screenPlay();
+  return screenHome();
+}
+function screenHome() {
+  const fileNote = location.protocol === "file:" ? `<p class="note">Чтобы читать фото карточек, запускайте файл «Открыть счётчик».</p>` : "";
+  return `<main class="wrap stack"><p class="kicker">Настольный счётчик</p><h1 class="home-title">Подземелье</h1><p class="note">Ход по фазам, слава, риск, здоровье и уровень. Герои добавляются фотографией карточки — из любого набора. Партия хранится в этом телефоне, компьютер для игры не нужен.</p>${fileNote}<div class="card stack"><p class="summary">${esc(rulesLine())}</p><button type="button" class="btn gold block" data-act="go-setup" ${state.heroes.length ? "" : "disabled"}>Новая партия</button><button type="button" class="btn block" data-act="continue" ${state.game ? "" : "disabled"}>Продолжить</button><button type="button" class="btn block" data-act="go-library">Герои</button><button type="button" class="btn ghost block" data-act="open-settings">Настройки игры</button></div></main>`;
+}
+function screenSettings() {
+  const s = state.settings;
+  return `<main class="wrap stack"><button type="button" class="btn ghost" data-act="back">Назад</button><h1>Настройки игры</h1><p class="note">Правила действуют сразу, в том числе в текущей партии.</p>
+  <section class="card setting"><h2>Заданий для победы</h2>${stepper(s.questsToWin, "setting", 'data-key="questsToWin"')}<p class="note">Сколько заданий нужно завершить одному герою. В правилах набора это 3.</p></section>
+  <section class="card setting"><h2>Максимальный уровень</h2>${stepper(s.maxLevel, "setting", 'data-key="maxLevel"')}${levelPreview()}</section>
+  <section class="card setting"><div class="spread"><div><h2>Здоровье за уровень</h2><p class="note">При повышении максимум и текущее здоровье +1. При понижении максимум уменьшается, лишнее текущее срезается. Уже полученные уровни задним числом не пересчитываются.</p></div><button type="button" class="switch ${s.healthOnLevel ? "on" : ""}" data-act="setting" data-key="healthOnLevel" aria-pressed="${s.healthOnLevel}" aria-label="Увеличивать здоровье при повышении уровня"><span></span></button></div></section>
+  <section class="card setting"><h2>Наборов в партии</h2>${stepper(s.sets, "setting", 'data-key="sets"')}<p class="note">Одна игра — колоды как ниже. Вторая игра с тем же числом карт удваивает и поверхность, и подземелье.</p><h2>Поверхность в одном наборе</h2>${stepper(s.surfacePerSet, "setting", 'data-key="surfacePerSet"')}<h2>Подземелье в одном наборе</h2>${stepper(s.dungeonPerSet, "setting", 'data-key="dungeonPerSet"')}<p class="note">В новых партиях будет: поверхность ${deckTotals(s).surface}, подземелье ${deckTotals(s).dungeon}. Пустыня — только поверхность, после входа и дорог обычно 17. Подземный набор впишите во вторую строку и оставьте наборов 1, если он не дублирует пустыню. Уже идущую партию эти цифры не переписывают.</p></section>
+  </main>`;
+}
+function screenLibrary() {
+  const tiles = state.heroes.map((h) => `<article class="hero-tile"><button type="button" class="hero-tile" data-act="edit-hero" data-id="${h.id}">${face(h.photo, h.name, "face")}<span><b>${esc(h.name)}</b><small class="muted">${esc(h.race || "без расы")}${h.setName ? " · " + esc(h.setName) : ""}</small></span></button><button type="button" class="tiny danger" data-act="delete-hero" data-id="${h.id}">Удалить</button></article>`).join("");
+  return `<main class="wrap stack"><button type="button" class="btn ghost" data-act="back">Назад</button><h1>Герои</h1><p class="note">Сфотографируйте карточку. Имя и цифры можно поправить перед сохранением. Список остаётся в этом браузере.</p><div class="row"><button type="button" class="btn gold" data-act="new-hero" data-mode="camera">Сфотографировать</button><button type="button" class="btn" data-act="new-hero" data-mode="file">Выбрать снимок</button><button type="button" class="btn ghost" data-act="blank-hero">Вручную</button></div><div class="heroes">${tiles || `<p class="note">Пока пусто. Добавьте героев из ваших наборов.</p>`}</div></main>`;
+}
+function numInput(path, value) {
+  const missing = value == null || value === "";
+  return `<input data-bind="draft.${path}" data-num="1" inputmode="numeric" value="${value ?? ""}" class="${missing ? "missing" : ""}">`;
+}
+function screenHero() {
+  const d = state.draft;
+  const head = ["", "1", "2", "3", "4"].map((x) => `<b>${x}</b>`).join("");
+  const row = (label, key) => `<span>${label}</span>` + d.stats.map((s, i) => numInput(`stats.${i}.${key}`, s[key])).join("");
+  const photo = d.photo ? `<img class="photo-frame" alt="Карточка героя" src="${d.photo}">` : `<div class="photo-frame" style="height:140px"></div>`;
+  const busy = state.scan.busy ? `<p id="ocr-status">Читаю карточку…</p><div class="bar"><i id="ocr-bar"></i></div>` : "";
+  return `<main class="wrap stack"><button type="button" class="btn ghost" data-act="back">Назад</button><h1>${d.id ? "Герой" : "Новый герой"}</h1><p class="note">Держите в кадре имя и таблицу уровней. Пустые клетки подсвечены — их нужно заполнить.</p>${state.scan.error ? `<p class="note">${esc(state.scan.error)}</p>` : ""}${photo}${busy}<div class="row"><button type="button" class="btn" data-act="pick" data-mode="camera">Переснять</button><button type="button" class="btn ghost" data-act="pick" data-mode="file">Другой файл</button></div>
+  <label class="field">Имя<input data-bind="draft.name" value="${esc(d.name)}"></label>
+  <label class="field">Раса и класс<input data-bind="draft.race" value="${esc(d.race)}"></label>
+  <label class="field">Набор<input data-bind="draft.setName" value="${esc(d.setName)}" placeholder="Пустыня, Ледяная ведьма…"></label>
+  <div class="card statgrid">${head}${row("Ближний", "melee")}${row("Магия", "magic")}${row("Скорость", "speed")}</div>
+  <div class="row"><label class="field">Здоровье${numInput("health", d.health)}</label><label class="field">Преимущества${numInput("boonLimit", d.boonLimit)}</label><label class="field">Сокровища${numInput("treasureLimit", d.treasureLimit)}</label></div>
+  <label class="field">Умение<textarea data-bind="draft.ability">${esc(d.ability)}</textarea></label>
+  <details class="card"><summary>Что прочитала камера</summary><p class="note">${esc(d.ocrText || "Пока ничего.")}</p></details>
+  <button type="button" class="btn gold block" data-act="save-hero">Сохранить героя</button></main>`;
+}
+function screenSetup() {
+  const setup = state.setup;
+  const seats = setup.seats.map((seat, i) => {
+    const heroes = state.heroes.map((h) => {
+      const taken = setup.seats.some((s, j) => j !== i && s.heroId === h.id);
+      const on = seat.heroId === h.id;
+      return `<button type="button" class="hero-tile ${on ? "on" : ""} ${taken && !on ? "taken" : ""}" data-act="pick-hero" data-seat="${i}" data-id="${h.id}">${face(h.photo, h.name, "face")}<span><b>${esc(h.name)}</b><small class="muted">${esc(h.race || "")}</small></span></button>`;
+    }).join("");
+    return `<section class="card stack"><div class="spread"><h2>Место ${i + 1}${setup.first === i ? " · ходит первым" : ""}</h2><div class="row"><button type="button" class="tiny" data-act="seat-move" data-seat="${i}" data-delta="-1">Выше</button><button type="button" class="tiny" data-act="seat-move" data-seat="${i}" data-delta="1">Ниже</button></div></div><label class="field">Имя игрока<input data-bind="seat.${i}.playerName" value="${esc(seat.playerName)}"></label><div class="heroes">${heroes}</div><button type="button" class="btn ghost" data-act="first" data-seat="${i}">Ходит первым</button></section>`;
+  }).join("");
+  const dice = setup.die ? `<p class="note">Кубики: ${setup.die.map((n, i) => esc(setup.seats[i].playerName) + " " + n).join(", ")}. При равенстве первым остаётся тот, кто раньше по кругу.</p>` : "";
+  return `<main class="wrap stack"><button type="button" class="btn ghost" data-act="go-home">На главную</button><h1>Новая партия</h1><p class="note">Добавляйте игроков по часовой стрелке. Ход переходит к следующему.</p><div class="card setting"><h2>Игроков</h2>${stepper(setup.count, "players")}</div><div class="card stack"><p>${esc(rulesLine())}</p><button type="button" class="btn ghost" data-act="open-settings">Изменить правила</button></div>${seats}<div class="row"><button type="button" class="btn" data-act="roll-first">Кубик за первого</button><button type="button" class="btn gold" data-act="add-during-setup">Добавить героя</button></div>${dice}<button type="button" class="btn gold block" data-act="start-game">Начать у входа</button><p class="note">На входе каждый получает 1 славу и 1 риск. Здоровье берётся с карточки.</p></main>`;
+}
+
+function counter(cls, label, value, sub, id, key) {
+  return `<div class="counter ${cls}"><button type="button" data-act="bump" data-id="${id}" data-key="${key}" data-delta="-1">−</button><div><b>${value}</b><small>${sub}</small><span>${label}</span></div><button type="button" data-act="bump" data-id="${id}" data-key="${key}" data-delta="1">+</button></div>`;
+}
+function screenPlay() {
+  const g = state.game;
+  const p = current();
+  const st = statsOf(p);
+  const s = state.settings;
+  const rail = PHASES.map(([id, name], i) => {
+    const cur = PHASES.findIndex((x) => x[0] === g.phase);
+    const cls = i === cur ? "now" : i < cur ? "past" : "";
+    return `<span class="${cls}">${i + 1}. ${name}</span>`;
+  }).join("");
+  const marks = s.questsToWin <= 10
+    ? `<span class="pips">${Array.from({ length: s.questsToWin }, (_, i) => `<i class="${i < p.quests ? "got" : ""}"></i>`).join("")}</span>`
+    : `<b>${p.quests} / ${s.questsToWin}</b>`;
+  const hero = `<section class="card stack"><div class="spread">${face(p.photo, p.heroName, "face-lg")}<div class="stack"><p class="kicker">Раунд ${g.round}${state.die ? " · кубик " + state.die : ""}</p><h2>${esc(p.heroName)}</h2><p class="muted">${esc(p.playerName)}${p.race ? " · " + esc(p.race) : ""}</p>${p.eliminated ? `<b>Выбыл</b>` : ""}</div></div>
+    <div class="stats"><div class="stat" data-stat="melee"><b>${st.melee}</b><small>Ближний</small><em>${esc(statHint(p, "melee"))}</em></div><div class="stat" data-stat="magic"><b>${st.magic}</b><small>Магия</small><em>${esc(statHint(p, "magic"))}</em></div><div class="stat" data-stat="speed"><b>${st.speed}</b><small>Скорость</small><em>${esc(statHint(p, "speed"))}</em></div></div>
+    <div class="spread"><div><p>Уровень <b data-level="${p.level}">${p.level}</b> / ${s.maxLevel}</p><p class="note">${s.maxLevel > 4 ? "Выше 4-го: +1 ко всем за каждый уровень. " : ""}${s.healthOnLevel ? "За уровень +1 к здоровью." : ""}</p></div><div class="row"><button type="button" class="tiny" data-act="level" data-delta="-1">−</button><button type="button" class="tiny" data-act="level" data-delta="1" ${p.level >= s.maxLevel ? "disabled" : ""}>+</button></div></div>
+    <div class="spread"><div class="row">${marks}<span>задания ${p.quests}</span></div><button type="button" class="tiny" data-act="quest" data-delta="-1" ${p.quests ? "" : "disabled"}>Снять</button></div>
+    <div class="counters">${counter("life", "Здоровье", p.health, "из " + p.healthMax, p.id, "health")}${counter("glory", "Слава", p.glory, "свои карты", p.id, "glory")}${counter("peril", "Риск", p.peril, "тратят соперники", p.id, "peril")}${counter("ap", "Действия", p.ap, p.savedAp ? "ещё 1 вне хода" : "в этот ход", p.id, "ap")}</div>
+    <div class="row"><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="healthMax" data-delta="-1">Макс. здоровье −</button><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="healthMax" data-delta="1">Макс. здоровье +</button></div>
+    ${p.ability ? `<details><summary>Умение</summary><p class="note">${esc(p.ability)}</p><button type="button" class="tiny" data-act="ability">${p.abilityUsed ? "Уже использовано" : "Отметить использование"}</button></details>` : ""}
+    ${cardsHtml(p)}</section>`;
+  const phase = `<section class="card stack" data-phase="${g.phase}"><h2>${esc(PHASES.find((x) => x[0] === g.phase)[1])}</h2>${phaseBody()}${phaseButtons()}</section>`;
+  const strip = `<div class="wide stack"><h3>Все герои</h3><div class="heroes">${g.players.map((hero, i) => `<button type="button" class="chip ${i === g.active ? "on" : ""} ${hero.eliminated ? "dead" : ""}" data-act="sheet" data-id="${hero.id}">${face(hero.photo, hero.heroName, "face")}<span><b>${esc(hero.playerName)}</b><small>❤ ${hero.health}/${hero.healthMax} · слава ${hero.glory} · риск ${hero.peril}${hero.savedAp ? " · 1 вне хода" : ""}</small></span></button>`).join("")}</div></div>`;
+  return `<main class="wrap stack"><div class="spread"><button type="button" class="tiny" data-act="undo" ${state.history.length ? "" : "disabled"}>Отменить</button><button type="button" class="tiny" data-act="roll">Кубик${state.die ? " " + state.die : ""}</button><button type="button" class="tiny" data-act="menu">Меню</button></div><div class="rail">${rail}</div><div class="play-grid">${hero}${phase}${strip}</div>${overlays()}</main>`;
+}
+function cardsHtml(p) {
+  const lim = limitsOf(p);
+  const list = p.cards.map((c) => `<div><span><b>${esc(c.name)}</b><small class="muted"> ${esc(kindName(c.kind))}${c.until === "turn" ? ", до восстановления" : ""}</small></span><button type="button" class="tiny" data-act="drop-card" data-pid="${p.id}" data-cid="${c.id}">Снять</button></div>`).join("");
+  return `<details><summary>Карты: преимущества ${countKind(p, "boon")}/${lim.boon}, сокровища ${countKind(p, "treasure")}/${lim.treasure}</summary><div class="cards">${list || `<p class="note">Пока нет.</p>`}</div></details>`;
+}
+function kindName(k) { return { boon: "преимущество", treasure: "сокровище", instant: "мгновенная", curse: "эффект" }[k] || k; }
+function planeToggle() {
+  const g = state.game;
+  ensureDecks(g);
+  const side = (id) => `<button type="button" class="${g.plane === id ? "on" : ""}" data-act="plane" data-plane="${id}"><span>${planeLabel(id)}</span><b>${g.decks[id]}</b></button>`;
+  return `<div class="plane" role="group" aria-label="Откуда открывать локацию">${side("surface")}${side("dungeon")}</div>`;
+}
+function phaseBody() {
+  const g = state.game;
+  ensureDecks(g);
+  const p = current();
+  const st = statsOf(p);
+  if (g.phase === "recovery") return `<p class="note">Старые очки действия сгорают, в том числе сохранённое на чужой ход. Новые станут равны скорости: <b>${st.speed}</b>.</p>`;
+  if (g.phase === "villainy") return villainyBody();
+  if (g.phase === "location") {
+    const left = g.decks[g.plane];
+    return `<p class="note">Откройте одну локацию из той колоды, где сейчас стоит герой. Слава и риск с карты придут, когда он в неё войдёт.</p>${planeToggle()}${left ? `<p class="note">Спишется 1 карта: ${planeLabel(g.plane).toLowerCase()}.</p>` : `<p class="note">Эта колода пуста. Переключите ползунок или пропустите фазу.</p>`}<p>Поправить «${planeLabel(g.plane)}»</p>${stepper(left, "deck")}`;
+  }
+  if (g.phase === "deeds") return deedsBody();
+  return discardBody();
+}
+function villainyBody() {
+  const g = state.game;
+  const me = current();
+  const foes = g.players.filter((p) => p.id !== me.id && !p.eliminated);
+  const any = foes.some((p) => p.peril > 0);
+  const blocks = foes.map((p) => {
+    const pay = g.pay[p.id] || 1;
+    return `<article class="foe">${face(p.photo, p.heroName, "face")}<div class="stack" style="flex:1"><b>${esc(p.heroName)}</b><span class="muted">${esc(p.playerName)} · риск <b data-foe-peril="${p.id}">${p.peril}</b> · здоровье ${p.health}</span><div class="stepper"><button type="button" data-act="pay" data-id="${p.id}" data-delta="-1">−</button><b>${pay}</b><button type="button" data-act="pay" data-id="${p.id}" data-delta="1">+</button></div><button type="button" class="btn gold" data-act="spend" data-id="${p.id}">Списать его риск</button><div class="row"><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="-1">Рана</button><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="1">Лечение</button><button type="button" class="tiny" data-act="grant-peril" data-id="${p.id}">+1 риск</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="curse">Эффект</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="instant">Его ответ</button></div></div></article>`;
+  }).join("");
+  return `<p class="note">Спишите риск одного соперника на проклятие или столкновение. Одну карту нельзя оплатить двоими. Свой риск тратить нельзя.</p>${any ? "" : `<p class="note">Ни у кого из соперников нет риска — фазу можно пропустить.</p>`}<div class="stack">${blocks}</div><div class="row"><button type="button" class="tiny" data-act="grant-glory">+1 слава за рану монстру</button><button type="button" class="tiny" data-act="grant-peril" data-id="${me.id}">+1 риск себе</button></div>`;
+}
+function deedsBody() {
+  const g = state.game;
+  const p = current();
+  const need = state.settings.questsToWin;
+  const win = p.quests + 1 >= need;
+  let prompt = "";
+  if (g.prompt && g.prompt.type === "move") {
+    prompt = `<div class="card stack"><p>Новая локация?</p><p class="note">Слава и риск с карты локации. Если здесь уже были в этот ход — ничего не берите.</p><div class="row"><span>Слава</span>${stepper(g.prompt.glory, "prompt", 'data-key="glory"')}</div><div class="row"><span>Риск</span>${stepper(g.prompt.peril, "prompt", 'data-key="peril"')}</div><div class="row"><button type="button" class="btn gold" data-act="move-new">Забрать</button><button type="button" class="btn" data-act="move-old">Уже был</button><button type="button" class="btn ghost" data-act="move-cancel">Отмена хода</button></div></div>`;
+  }
+  return `${p.fallen ? `<p class="note">Герой лежит и не может двигаться. Очко действия уходит на подъём.</p><button type="button" class="btn gold" data-act="stand">Встать</button>` : ""}
+  <div class="row"><button type="button" class="btn" data-act="move">Перемещение −1</button><button type="button" class="btn" data-act="explore">Исследовать −1</button><button type="button" class="btn" data-act="fall">${p.fallen ? "Уже лежит" : "Упал"}</button></div>
+  ${prompt}
+  <button type="button" class="btn gold block" data-act="open-card" data-id="${p.id}" data-kind="boon">Карта славы</button>
+  <button type="button" class="btn block" data-act="quest" data-delta="1">${win ? "Задание выполнено — победа" : "Задание выполнено"}</button>
+  <p class="note">Движение, исследование, карты славы и задания можно мешать. Успешное задание сразу закрывает фазу. Первая попытка задания за ход не тратит действие.</p>
+  ${planeToggle()}
+  <p class="note">Исследование берёт карту оттуда, где герой: ${planeLabel(g.plane).toLowerCase()}, осталось ${g.decks[g.plane]}.</p>`;
+}
+function discardBody() {
+  const g = state.game;
+  const p = current();
+  let stay = "";
+  if (!p.moved && !p.stayTaken) {
+    stay = `<div class="stack"><p>Вы не двигались. Возьмите славу и риск клетки, на которой стоите.</p><div class="row"><span>Слава</span>${stepper(g.stay.glory, "stay", 'data-key="glory"')}</div><div class="row"><span>Риск</span>${stepper(g.stay.peril, "stay", 'data-key="peril"')}</div><button type="button" class="btn" data-act="take-stay">Взять с клетки</button></div>`;
+  }
+  return `${stay}<label class="row"><input type="checkbox" data-flag="saveAp" ${g.saveAp ? "checked" : ""} ${p.ap > 0 ? "" : "disabled"}> Сохранить 1 очко действия на чужой ход</label><div class="spread"><span>Карт в руке</span><div class="row"><button type="button" class="tiny" data-act="hand" data-delta="-1">−</button><b>${p.hand}</b><button type="button" class="tiny" data-act="hand" data-delta="1">+</button></div></div><p class="note">Если рука не пуста, сбросьте одну карту с руки, сокровище или столкновение из логова. Потом доберите до пяти. Лишнее сокровище снимается в списке карт героя.</p>`;
+}
+function phaseButtons() {
+  const g = state.game;
+  ensureDecks(g);
+  if (g.phase === "recovery") return `<button type="button" class="btn gold block" data-act="finish">Восстановить</button><button type="button" class="btn ghost block" data-act="skip">Пропустить</button>`;
+  if (g.phase === "location") return `<button type="button" class="btn gold block" data-act="finish" ${g.decks[g.plane] ? "" : "disabled"}>Открыл локацию</button><button type="button" class="btn ghost block" data-act="skip">Пропустить</button>`;
+  if (g.phase === "discard") return `<button type="button" class="btn gold block" data-act="finish">Завершить ход</button><button type="button" class="btn ghost block" data-act="skip">Пропустить</button>`;
+  return `<button type="button" class="btn gold block" data-act="finish">Готово</button><button type="button" class="btn ghost block" data-act="skip">Пропустить</button>`;
+}
+function overlays() {
+  return menuHtml() + sheetHtml() + cardHtml() + victoryHtml();
+}
+function menuHtml() {
+  if (!state.menu) return "";
+  return `<div class="sheet"><div class="stack"><h2>Меню</h2><button type="button" class="btn block" data-act="open-settings">Настройки партии</button><button type="button" class="btn block" data-act="go-library">Герои</button><button type="button" class="btn block" data-act="go-home">На главную</button><button type="button" class="btn danger block" data-act="reset-game">Сбросить партию</button><button type="button" class="btn ghost block" data-act="close">Закрыть</button></div></div>`;
+}
+function sheetHtml() {
+  const p = state.sheetId ? byId(state.sheetId) : null;
+  if (!p) return "";
+  return `<div class="sheet"><div class="stack"><div class="spread"><h2>${esc(p.heroName)}</h2><button type="button" class="tiny" data-act="close">Закрыть</button></div><p class="note">Поправка, если нажали не туда. Оплата карт риска — в фазе злодеяний, и только чужим риском.</p>${counter("life", "Здоровье", p.health, "из " + p.healthMax, p.id, "health")}${counter("glory", "Слава", p.glory, "", p.id, "glory")}${counter("peril", "Риск", p.peril, "", p.id, "peril")}<div class="spread"><span>Вне хода</span><div class="row"><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="savedAp" data-delta="-1">−</button><b>${p.savedAp}</b><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="savedAp" data-delta="1">+</button></div></div></div></div>`;
+}
+function cardHtml() {
+  const m = state.modal;
+  if (!m) return "";
+  const step = (key, label) => `<div class="spread"><span>${label}</span><div class="stepper"><button type="button" data-act="mod" data-key="${key}" data-delta="-1">−</button><b>${m[key]}</b><button type="button" data-act="mod" data-key="${key}" data-delta="1">+</button></div></div>`;
+  const kinds = [["boon", "Преимущество"], ["treasure", "Сокровище"], ["instant", "Мгновенная"], ["curse", "Эффект"]].map(([id, name]) => `<button type="button" class="tiny ${m.kind === id ? "gold" : ""}" data-act="kind" data-kind="${id}">${name}</button>`).join("");
+  const who = state.game.players.map((p) => `<option value="${p.id}" ${p.id === m.targetId ? "selected" : ""}>${esc(p.heroName)}</option>`).join("");
+  return `<div class="modal"><div class="stack"><div class="spread"><h2>Карта или эффект</h2><button type="button" class="tiny" data-act="close-card">Закрыть</button></div><div class="row">${kinds}</div><label class="field">Название<input data-bind="modal.name" value="${esc(m.name)}"></label>${m.kind === "treasure" ? `<label class="field">Тип сокровища<input data-bind="modal.typeName" value="${esc(m.typeName)}" placeholder="шлем, плащ…"></label>` : ""}${m.kind === "curse" ? `<label class="field">На кого<select data-bind="modal.targetId">${who}</select></label>` : ""}${m.kind !== "curse" ? step("cost", "Цена в славе") : ""}<div class="row"><button type="button" class="tiny ${m.until === "permanent" ? "gold" : ""}" data-act="until" data-until="permanent">Постоянная</button><button type="button" class="tiny ${m.until === "turn" ? "gold" : ""}" data-act="until" data-until="turn">До восстановления</button></div>${step("melee", "Ближний")}${step("magic", "Магия")}${step("speed", "Скорость")}${step("heal", "Лечение сейчас")}${step("healthMax", "Максимум здоровья")}${step("boonLimit", "Предел преимуществ")}${step("treasureLimit", "Предел сокровищ")}<button type="button" class="btn gold block" data-act="play-card">Сыграть</button></div></div>`;
+}
+function victoryHtml() {
+  const g = state.game;
+  if (!g || !g.victory) return "";
+  const w = byId(g.victory.id);
+  const why = g.victory.reason === "quests" ? `Выполнено заданий: ${w.quests}.` : "Остальные герои выбыли.";
+  return `<div class="victory"><div class="stack"><p class="kicker">Победа</p><h2>${esc(w.heroName)}</h2><p>${esc(w.playerName)}. ${why}</p><button type="button" class="btn" data-act="undo">Отменить последний шаг</button><button type="button" class="btn gold" data-act="go-setup">Новая партия</button><button type="button" class="btn ghost" data-act="go-home">На главную</button></div></div>`;
+}
+
+function setPath(obj, path, value) {
+  const parts = path.split(".");
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) cur = cur[/^\d+$/.test(parts[i]) ? Number(parts[i]) : parts[i]];
+  const last = parts[parts.length - 1];
+  cur[/^\d+$/.test(last) ? Number(last) : last] = value;
+}
+function bump(p, key, delta) {
+  if (key === "health") p.health = clamp(p.health + delta, 0, p.healthMax);
+  else if (key === "healthMax") {
+    p.healthMax = Math.max(1, p.healthMax + delta);
+    if (p.health > p.healthMax) p.health = p.healthMax;
+  } else if (key === "savedAp") p.savedAp = clamp((p.savedAp || 0) + delta, 0, 1);
+  else p[key] = Math.max(0, (p[key] || 0) + delta);
+}
+function cardOwner() {
+  const m = state.modal;
+  if (m.kind === "curse" || (m.targetId && m.targetId !== current().id)) return byId(m.targetId);
+  return current();
+}
+function cardProblem() {
+  const m = state.modal;
+  const target = cardOwner();
+  if (!target) return "Нет героя";
+  const card = modalCard();
+  if (m.kind !== "curse" && target.glory < Math.max(0, m.cost || 0)) return "Не хватает славы";
+  if ((card.kind === "boon" || card.kind === "treasure") && card.until === "permanent") {
+    const lim = limitsOf(target, card);
+    const count = countKind(target, card.kind) + 1;
+    if (count > (card.kind === "boon" ? lim.boon : lim.treasure)) return card.kind === "boon" ? "Предел преимуществ" : "Предел сокровищ";
+  }
+  if (card.kind === "treasure" && card.until === "permanent" && card.typeName) {
+    const t = card.typeName.toLowerCase();
+    if (target.cards.some((c) => c.kind === "treasure" && c.until === "permanent" && (c.typeName || "").trim().toLowerCase() === t)) return "Такое сокровище уже есть";
+  }
+  return "";
+}
+function modalCard() {
+  const m = state.modal;
+  return {
+    id: uid(), name: (m.name || "Эффект").trim(), kind: m.kind, typeName: (m.typeName || "").trim(),
+    until: m.kind === "instant" ? "turn" : m.until,
+    melee: m.melee || 0, magic: m.magic || 0, speed: m.speed || 0,
+    heal: m.heal || 0, healthMax: m.healthMax || 0, boonLimit: m.boonLimit || 0, treasureLimit: m.treasureLimit || 0,
+    cost: Math.max(0, m.cost || 0),
+  };
+}
+function playModal() {
+  const m = state.modal;
+  const target = cardOwner();
+  const card = modalCard();
+  if (m.kind !== "curse") target.glory -= card.cost;
+  target.healthMax = Math.max(1, target.healthMax + card.healthMax);
+  target.health += card.healthMax;
+  if (card.heal) target.health += card.heal;
+  if (target.health > target.healthMax) target.health = target.healthMax;
+  if (target.health < 0) target.health = 0;
+  target.cards.push(card);
+  state.modal = null;
+}
+function makePlayer(seat, hero) {
+  return {
+    id: uid(), heroId: hero.id, playerName: seat.playerName.trim() || hero.name, heroName: hero.name,
+    race: hero.race || "", ability: hero.ability || "", photo: hero.photo || "",
+    cardStats: hero.stats.map((r) => ({ melee: Number(r.melee), magic: Number(r.magic), speed: Number(r.speed) })),
+    baseHealth: Number(hero.health), baseBoon: Number(hero.boonLimit), baseTreasure: Number(hero.treasureLimit),
+    level: 1, health: Number(hero.health), healthMax: Number(hero.health), glory: 1, peril: 1,
+    ap: 0, savedAp: 0, quests: 0, moved: false, stayTaken: false, fallen: false, eliminated: false,
+    abilityUsed: false, hand: 5, cards: [],
+  };
+}
+function openForm(hero, back) {
+  state.formBack = back;
+  state.draft = hero ? draftFromHero(hero) : emptyDraft();
+  state.scan = { busy: false, error: "" };
+  go("hero");
+}
+function changeSetting(key, delta) {
+  const s = state.settings;
+  if (key === "healthOnLevel") s.healthOnLevel = !s.healthOnLevel;
+  if (key === "questsToWin") s.questsToWin = clamp(s.questsToWin + delta, 1, 12);
+  if (key === "sets") s.sets = clamp(s.sets + delta, 1, 2);
+  if (key === "surfacePerSet") s.surfacePerSet = clamp(s.surfacePerSet + delta, 0, 80);
+  if (key === "dungeonPerSet") s.dungeonPerSet = clamp(s.dungeonPerSet + delta, 0, 80);
+  if (key === "maxLevel") {
+    s.maxLevel = clamp(s.maxLevel + delta, 4, 20);
+    if (state.game) {
+      const names = [];
+      state.game.players.forEach((p) => { if (p.level > s.maxLevel) { p.level = s.maxLevel; names.push(p.heroName); } });
+      if (names.length) flash("Потолок снижен. Опущены: " + names.join(", ") + ". Здоровье не менял.");
+    }
+  }
+  saveSettings();
+  if (state.game) settle();
+  else render();
+}
+
+const actions = {
+  back() { go(state.screen === "hero" ? (state.formBack || "library") : (state.back || "home")); },
+  "go-home"() { state.menu = false; go("home"); },
+  continue() { if (state.game) go("play"); },
+  "open-settings"() { state.back = state.screen === "play" || state.screen === "setup" ? state.screen : "home"; state.menu = false; go("settings"); },
+  "go-library"() { state.back = state.screen === "play" || state.screen === "setup" ? state.screen : "home"; state.menu = false; go("library"); },
+  "go-setup"() { state.menu = false; startSetup(); },
+  setting(btn) { changeSetting(btn.dataset.key, Number(btn.dataset.delta || 0)); },
+  "new-hero"(btn) { openForm(null, state.screen === "setup" ? "setup" : "library"); setTimeout(() => pick(btn.dataset.mode), 0); },
+  "blank-hero"() { openForm(null, "library"); },
+  "edit-hero"(btn) { const h = state.heroes.find((x) => x.id === btn.dataset.id); if (h) openForm(h, "library"); },
+  "delete-hero"(btn) {
+    const h = state.heroes.find((x) => x.id === btn.dataset.id);
+    state.confirm = { text: "Удалить «" + (h ? h.name : "героя") + "» из списка?", yes: "Удалить", run: async () => { await deleteHero(btn.dataset.id); state.heroes = await listHeroes(); } };
+    render();
+  },
+  pick(btn) { pick(btn.dataset.mode); },
+  async "save-hero"() {
+    const bad = draftErrors(state.draft);
+    if (bad.length) { flash("Заполните: " + bad.join(", ")); return; }
+    const d = state.draft;
+    await saveHero({
+      id: d.id || uid(), name: d.name.trim(), race: d.race.trim(), setName: d.setName.trim(), ability: d.ability.trim(),
+      health: Number(d.health), boonLimit: Number(d.boonLimit), treasureLimit: Number(d.treasureLimit),
+      stats: d.stats.map((r) => ({ melee: Number(r.melee), magic: Number(r.magic), speed: Number(r.speed) })),
+      photo: d.photo || "", ocrText: d.ocrText || "", updatedAt: Date.now(),
+    });
+    state.heroes = await listHeroes();
+    flash("Герой сохранён");
+    go(state.formBack || "library");
+  },
+  players(btn) {
+    const n = clamp(state.setup.count + Number(btn.dataset.delta), 2, 6);
+    const seats = state.setup.seats;
+    while (seats.length < n) seats.push({ playerName: "Игрок " + (seats.length + 1), heroId: "" });
+    seats.length = n;
+    if (state.setup.first >= n) state.setup.first = 0;
+    state.setup.count = n;
+    render();
+  },
+  "pick-hero"(btn) {
+    const i = Number(btn.dataset.seat);
+    const id = btn.dataset.id;
+    if (state.setup.seats.some((s, j) => j !== i && s.heroId === id)) { flash("Этот герой уже сидит за столом"); return; }
+    state.setup.seats[i].heroId = state.setup.seats[i].heroId === id ? "" : id;
+    render();
+  },
+  "seat-move"(btn) {
+    const i = Number(btn.dataset.seat);
+    const j = i + Number(btn.dataset.delta);
+    const seats = state.setup.seats;
+    if (j < 0 || j >= seats.length) return;
+    const tmp = seats[i]; seats[i] = seats[j]; seats[j] = tmp;
+    if (state.setup.first === i) state.setup.first = j;
+    else if (state.setup.first === j) state.setup.first = i;
+    render();
+  },
+  first(btn) { state.setup.first = Number(btn.dataset.seat); render(); },
+  "roll-first"() {
+    const rolls = state.setup.seats.map(() => 1 + Math.floor(Math.random() * 6));
+    let best = 0;
+    rolls.forEach((n, i) => { if (n > rolls[best]) best = i; });
+    state.setup.die = rolls;
+    state.setup.first = best;
+    render();
+  },
+  "add-during-setup"() { openForm(null, "setup"); },
+  "start-game"() {
+    const setup = state.setup;
+    if (setup.seats.some((s) => !s.heroId)) { flash("Выберите героя каждому"); return; }
+    if (new Set(setup.seats.map((s) => s.heroId)).size !== setup.seats.length) { flash("Один герой не может сидеть дважды"); return; }
+    state.game = {
+      players: setup.seats.map((seat) => makePlayer(seat, state.heroes.find((h) => h.id === seat.heroId))),
+      active: setup.first, phase: "recovery", round: 1, decks: deckTotals(state.settings), plane: "surface", locationsLeft: deckTotals(state.settings).surface + deckTotals(state.settings).dungeon,
+      prompt: null, stay: { glory: 0, peril: 0 }, saveAp: false, pay: {}, victory: null,
+    };
+    state.history = [];
+    saveGame();
+    go("play");
+  },
+  undo() {
+    const prev = state.history.pop();
+    if (!prev) return;
+    state.game = prev;
+    state.menu = false;
+    saveGame();
+    render();
+  },
+  roll() { state.die = 1 + Math.floor(Math.random() * 6); render(); },
+  menu() { state.menu = true; render(); },
+  close() { state.menu = false; state.sheetId = null; render(); },
+  "close-card"() { state.modal = null; render(); },
+  sheet(btn) { state.sheetId = btn.dataset.id; render(); },
+  finish() {
+    const phase = state.game.phase;
+    ensureDecks(state.game);
+    if (phase === "location" && state.game.decks[state.game.plane] <= 0) { flash("Эта колода пуста — переключите ползунок или пропустите"); return; }
+    commit(() => {
+      if (phase === "recovery") applyRecovery();
+      else if (phase === "location") { drawLocation(state.game); nextPhase(); }
+      else if (phase === "discard") endTurn();
+      else nextPhase();
+    });
+  },
+  skip() { commit(() => { if (state.game.phase === "discard") endTurn(); else nextPhase(); }); },
+  plane(btn) {
+    ensureDecks(state.game);
+    state.game.plane = btn.dataset.plane === "dungeon" ? "dungeon" : "surface";
+    saveGame();
+    render();
+  },
+  deck(btn) { commit(() => { ensureDecks(state.game); const id = state.game.plane; state.game.decks[id] = Math.max(0, state.game.decks[id] + Number(btn.dataset.delta)); state.game.locationsLeft = state.game.decks.surface + state.game.decks.dungeon; }); },
+  pay(btn) {
+    const id = btn.dataset.id;
+    state.game.pay[id] = Math.max(1, (state.game.pay[id] || 1) + Number(btn.dataset.delta));
+    render();
+  },
+  spend(btn) {
+    const id = btn.dataset.id;
+    const amount = state.game.pay[id] || 1;
+    if (id === current().id) { flash("Свой риск тратить нельзя"); return; }
+    const foe = byId(id);
+    if (!foe || foe.peril < amount) { flash("У этого героя не хватает риска"); return; }
+    commit(() => { foe.peril -= amount; });
+  },
+  bump(btn) { commit(() => bump(byId(btn.dataset.id), btn.dataset.key, Number(btn.dataset.delta))); },
+  "grant-peril"(btn) { commit(() => { byId(btn.dataset.id).peril += 1; }); },
+  "grant-glory"() { commit(() => { current().glory += 1; }); },
+  level(btn) {
+    const delta = Number(btn.dataset.delta);
+    commit(() => {
+      const info = changeLevel(current(), delta);
+      if (info === null && delta > 0) flash("Это максимальный уровень");
+      else if (info) flash(info);
+      else flash("Уровень " + current().level);
+    });
+  },
+  quest(btn) { commit(() => addQuest(Number(btn.dataset.delta))); },
+  ability() { commit(() => { current().abilityUsed = !current().abilityUsed; }); },
+  move() {
+    const p = current();
+    if (p.fallen) { flash("Сначала встаньте"); return; }
+    if (p.ap < 1) { flash("Нет очков действия"); return; }
+    commit(() => { p.ap -= 1; state.game.prompt = { type: "move", glory: 0, peril: 0, wasMoved: p.moved }; });
+  },
+  "move-new"() { commit(() => { const p = current(); const pr = state.game.prompt; p.glory += pr.glory; p.peril += pr.peril; p.moved = true; state.game.prompt = null; }); },
+  "move-old"() { commit(() => { current().moved = true; state.game.prompt = null; }); },
+  "move-cancel"() { commit(() => { const p = current(); p.ap += 1; p.moved = state.game.prompt.wasMoved; state.game.prompt = null; }); },
+  prompt(btn) { const pr = state.game.prompt; pr[btn.dataset.key] = Math.max(0, pr[btn.dataset.key] + Number(btn.dataset.delta)); render(); },
+  explore() {
+    const p = current();
+    if (p.fallen) { flash("Лёжа можно только встать"); return; }
+    if (p.ap < 1) { flash("Нет очков действия"); return; }
+    ensureDecks(state.game);
+    if (state.game.decks[state.game.plane] < 1) { flash("Колода «" + planeLabel(state.game.plane) + "» пуста"); return; }
+    commit(() => { p.ap -= 1; drawLocation(state.game); });
+  },
+  fall() { if (!current().fallen) commit(() => { current().fallen = true; }); },
+  stand() {
+    const p = current();
+    if (!p.fallen) return;
+    if (p.ap < 1 && p.savedAp < 1) { flash("Нет очка действия, чтобы встать"); return; }
+    commit(() => { if (p.ap > 0) p.ap -= 1; else p.savedAp -= 1; p.fallen = false; });
+  },
+  stay(btn) { state.game.stay[btn.dataset.key] = Math.max(0, state.game.stay[btn.dataset.key] + Number(btn.dataset.delta)); render(); },
+  "take-stay"() { commit(() => { const p = current(); p.glory += state.game.stay.glory; p.peril += state.game.stay.peril; p.stayTaken = true; }); },
+  hand(btn) { commit(() => { current().hand = Math.max(0, current().hand + Number(btn.dataset.delta)); }); },
+  "open-card"(btn) {
+    const kind = btn.dataset.kind || "boon";
+    state.modal = {
+      name: "", kind, typeName: "", cost: kind === "curse" ? 0 : 1,
+      until: kind === "instant" || kind === "curse" ? "turn" : "permanent",
+      melee: 0, magic: 0, speed: 0, heal: 0, healthMax: 0, boonLimit: 0, treasureLimit: 0,
+      targetId: btn.dataset.id || current().id,
+    };
+    render();
+  },
+  kind(btn) {
+    state.modal.kind = btn.dataset.kind;
+    if (btn.dataset.kind === "instant") state.modal.until = "turn";
+    if (btn.dataset.kind === "boon" || btn.dataset.kind === "treasure") state.modal.until = "permanent";
+    render();
+  },
+  until(btn) { if (state.modal.kind !== "instant") { state.modal.until = btn.dataset.until; render(); } },
+  mod(btn) { state.modal[btn.dataset.key] = (state.modal[btn.dataset.key] || 0) + Number(btn.dataset.delta); render(); },
+  "play-card"() {
+    const problem = cardProblem();
+    if (problem) { flash(problem); return; }
+    commit(() => playModal());
+  },
+  "drop-card"(btn) { commit(() => removeCard(byId(btn.dataset.pid), btn.dataset.cid)); },
+  "reset-game"() {
+    state.confirm = { text: "Сбросить текущую партию? Герои в списке останутся.", yes: "Сбросить", run: () => { state.game = null; state.history = []; saveGame(); state.menu = false; go("home"); } };
+    render();
+  },
+  "confirm-yes"() { const run = state.confirm && state.confirm.run; state.confirm = null; if (run) Promise.resolve(run()).then(() => render()); },
+  "confirm-no"() { state.confirm = null; render(); },
+};
+
+function pick(mode) {
+  const input = document.getElementById(mode === "camera" ? "camera-input" : "photo-input");
+  input.click();
+}
+function startSetup() {
+  if (!state.heroes.length) { flash("Сначала добавьте хотя бы двух героев"); go("library"); return; }
+  state.setup = { count: 2, first: 0, die: null, seats: [{ playerName: "Игрок 1", heroId: "" }, { playerName: "Игрок 2", heroId: "" }] };
+  go("setup");
+}
+function onInput(e) {
+  const el = e.target;
+  if (el.dataset.flag === "saveAp" && state.game) { state.game.saveAp = el.checked; return; }
+  if (!el.dataset.bind) return;
+  let value = el.value;
+  if (el.dataset.num) {
+    value = value === "" ? null : Number(value);
+    el.classList.toggle("missing", value == null || Number.isNaN(value));
+  }
+  const path = el.dataset.bind;
+  if (path.startsWith("draft.")) setPath(state.draft, path.slice(6), value);
+  else if (path.startsWith("modal.")) setPath(state.modal, path.slice(6), value);
+  else if (path.startsWith("seat.")) {
+    const parts = path.split(".");
+    state.setup.seats[Number(parts[1])][parts[2]] = value;
+  }
+}
+function onClick(e) {
+  const btn = e.target.closest("[data-act]");
+  if (!btn || btn.disabled) return;
+  const fn = actions[btn.dataset.act];
+  if (fn) Promise.resolve(fn(btn)).catch((err) => { console.error(err); flash("Что-то пошло не так. Попробуйте ещё раз."); });
+}
+async function onFile(e) {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if (file && state.draft) await onPhoto(file);
+}
+
+function bind() {
+  window.addEventListener("click", onClick, true);
+  app.addEventListener("input", onInput);
+  app.addEventListener("change", onInput);
+  document.getElementById("photo-input").addEventListener("change", onFile);
+  document.getElementById("camera-input").addEventListener("change", onFile);
+}
+async function boot() {
+  state.settings = loadSettings();
+  state.game = loadGame();
+  try { state.heroes = await listHeroes(); } catch (e) { state.heroes = []; }
+  bind();
+  render(true);
+  if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
+}
+boot();
