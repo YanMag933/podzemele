@@ -493,7 +493,8 @@ function view() {
 }
 function screenHome() {
   const fileNote = location.protocol === "file:" ? `<p class="note">Чтобы читать фото карточек, запускайте файл «Открыть счётчик».</p>` : "";
-  return `<main class="wrap stack"><p class="kicker">Настольный счётчик</p><h1 class="home-title">Подземелье</h1><p class="note">Ход по фазам, слава, риск, здоровье и уровень. Герои добавляются фотографией карточки — из любого набора. Партия хранится в этом телефоне, компьютер для игры не нужен.</p>${fileNote}<div class="card stack"><p class="summary">${esc(rulesLine())}</p><button type="button" class="btn gold block" data-act="go-setup" ${state.heroes.length ? "" : "disabled"}>Новая партия</button><button type="button" class="btn block" data-act="continue" ${state.game ? "" : "disabled"}>Продолжить</button><button type="button" class="btn block" data-act="go-library">Герои</button><button type="button" class="btn ghost block" data-act="open-settings">Настройки игры</button></div></main>`;
+  const needHeroes = state.heroes.length < 2 ? `<p class="note">Сначала добавьте двух разных героев. Настройки можно менять сразу, партия откроется после героев.</p>` : "";
+  return `<main class="wrap stack"><p class="kicker">Настольный счётчик</p><h1 class="home-title">Подземелье</h1><p class="note">Ход по фазам, слава, риск, здоровье и уровень. Герои добавляются фотографией карточки — из любого набора. Партия хранится в этом телефоне, компьютер для игры не нужен.</p>${fileNote}<div class="card stack"><p class="summary">${esc(rulesLine())}</p>${needHeroes}<button type="button" class="btn gold block" data-act="go-setup" ${state.heroes.length >= 2 ? "" : "disabled"}>Новая партия</button><button type="button" class="btn block" data-act="continue" ${state.game ? "" : "disabled"}>Продолжить</button><button type="button" class="btn block" data-act="go-library">Герои</button><button type="button" class="btn ghost block" data-act="open-settings">Настройки игры</button><button type="button" class="btn ghost block" data-act="refresh-app">Обновить приложение</button><p class="note">Если вышла новая версия, нажмите «Обновить приложение». Герои и партия останутся.</p></div></main>`;
 }
 function screenSettings() {
   const s = state.settings;
@@ -964,6 +965,19 @@ const actions = {
   },
   "confirm-yes"() { const run = state.confirm && state.confirm.run; state.confirm = null; if (run) Promise.resolve(run()).then(() => render()); },
   "confirm-no"() { state.confirm = null; render(); },
+  async "refresh-app"() {
+    try {
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((key) => caches.delete(key)));
+      }
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((reg) => reg.unregister()));
+      }
+    } catch (e) { /* всё равно перезагружаем */ }
+    location.reload();
+  },
 };
 
 function pick(mode) {
@@ -971,7 +985,7 @@ function pick(mode) {
   input.click();
 }
 function startSetup() {
-  if (!state.heroes.length) { flash("Сначала добавьте хотя бы двух героев"); go("library"); return; }
+  if (state.heroes.length < 2) { flash("Сначала добавьте хотя бы двух героев"); go("library"); return; }
   state.setup = { count: 2, first: 0, die: null, seats: [{ playerName: "Игрок 1", heroId: "" }, { playerName: "Игрок 2", heroId: "" }] };
   go("setup");
 }
