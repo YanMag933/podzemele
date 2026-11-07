@@ -8,6 +8,7 @@ const PHASES = [
 ];
 const SETTINGS_KEY = "dungeoneer-settings";
 const GAME_KEY = "dungeoneer-game";
+const CARDS_KEY = "dungeoneer-cards";
 
 const state = {
   screen: "home",
@@ -25,6 +26,8 @@ const state = {
   toast: "",
   confirm: null,
   die: null,
+  reward: null,
+  counter: null,
 };
 
 const app = document.getElementById("app");
@@ -69,6 +72,10 @@ function loadSettings() {
 function deckTotals(s) {
   return { surface: s.surfacePerSet * s.sets, dungeon: s.dungeonPerSet * s.sets };
 }
+function startingDecks(s) {
+  const totals = deckTotals(s);
+  return { surface: Math.max(0, totals.surface - 5), dungeon: totals.dungeon };
+}
 function planeLabel(id) { return id === "dungeon" ? "Подземелье" : "Поверхность"; }
 function ensureDecks(g) {
   if (!g.decks) {
@@ -88,6 +95,72 @@ function drawLocation(g) {
   return true;
 }
 function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings)); }
+function loadCardBook() {
+  try {
+    const list = JSON.parse(localStorage.getItem(CARDS_KEY) || "[]");
+    return Array.isArray(list) ? list : [];
+  } catch (e) { return []; }
+}
+function savedCards(kind) {
+  return loadCardBook().filter((c) => c.kind === kind).sort((a, b) => a.name.localeCompare(b.name, "ru"));
+}
+function rememberCard(card) {
+  if (!card || (card.kind !== "boon" && card.kind !== "treasure")) return "";
+  const name = String(card.name || "").trim();
+  if (!name || name === "Эффект") return "";
+  const book = loadCardBook();
+  const key = card.kind + "\n" + name.toLowerCase();
+  const prev = book.find((c) => c.kind + "\n" + String(c.name).toLowerCase() === key);
+  const entry = {
+    id: prev ? prev.id : uid(),
+    name, kind: card.kind, typeName: String(card.typeName || "").trim(),
+    until: card.until === "turn" ? "turn" : "permanent",
+    melee: num(card.melee), magic: num(card.magic), speed: num(card.speed),
+    heal: num(card.heal), healthMax: num(card.healthMax),
+    boonLimit: num(card.boonLimit), treasureLimit: num(card.treasureLimit),
+    cost: Math.max(0, num(card.cost)),
+    special: card.special && String(card.special.text || "").trim()
+      ? { stat: card.special.stat === "melee" ? "melee" : "magic", text: String(card.special.text).trim() }
+      : null,
+  };
+  if (prev) Object.assign(prev, entry);
+  else book.push(entry);
+  localStorage.setItem(CARDS_KEY, JSON.stringify(book));
+  return prev ? "updated" : "new";
+}
+function absorbCards(g) {
+  if (!g || !Array.isArray(g.players)) return;
+  g.players.forEach((p) => (p.cards || []).forEach(rememberCard));
+}
+function applySavedCard(entry) {
+  const m = state.modal;
+  if (!m || !entry) return;
+  m.name = entry.name;
+  m.kind = entry.kind;
+  m.typeName = entry.typeName || "";
+  m.cost = num(entry.cost);
+  m.until = entry.until === "turn" ? "turn" : "permanent";
+  m.melee = num(entry.melee);
+  m.magic = num(entry.magic);
+  m.speed = num(entry.speed);
+  m.heal = num(entry.heal);
+  m.healthMax = num(entry.healthMax);
+  m.boonLimit = num(entry.boonLimit);
+  m.treasureLimit = num(entry.treasureLimit);
+  m.specialOn = !!(entry.special && entry.special.text);
+  m.specialStat = entry.special && entry.special.stat === "melee" ? "melee" : "magic";
+  m.specialText = entry.special ? entry.special.text : "";
+}
+function cardBits(card) {
+  const bits = [];
+  const put = (label, value) => { if (value) bits.push(label + " " + (value > 0 ? "+" : "") + value); };
+  put("ближний", num(card.melee));
+  put("магия", num(card.magic));
+  put("скорость", num(card.speed));
+  put("лечение", num(card.heal));
+  put("макс. здоровье", num(card.healthMax));
+  return bits;
+}
 function loadGame() {
   try {
     const g = JSON.parse(localStorage.getItem(GAME_KEY) || "null");
@@ -95,6 +168,8 @@ function loadGame() {
     g.stay = g.stay || { glory: 0, peril: 0 };
     g.pay = g.pay || {};
     ensureDecks(g);
+    g.fights = Array.isArray(g.fights) ? g.fights : [];
+    absorbCards(g);
     return g;
   } catch (e) { return null; }
 }
@@ -304,16 +379,17 @@ function printed(p) {
   const extra = Math.max(0, p.level - 4);
   return { melee: row.melee + extra, magic: row.magic + extra, speed: row.speed + extra, extra, row };
 }
+function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 function itemMods(p) {
-  return p.cards.reduce((m, c) => ({
-    melee: m.melee + (c.melee || 0), magic: m.magic + (c.magic || 0), speed: m.speed + (c.speed || 0),
+  return (p.cards || []).reduce((m, c) => ({
+    melee: m.melee + num(c.melee), magic: m.magic + num(c.magic), speed: m.speed + num(c.speed),
   }), { melee: 0, magic: 0, speed: 0 });
 }
 function statsOf(p) {
   const base = printed(p);
   const mod = itemMods(p);
   return {
-    melee: base.melee + mod.melee, magic: base.magic + mod.magic, speed: base.speed + mod.speed,
+    melee: base.melee + mod.melee + (p.rewardMelee || 0), magic: base.magic + mod.magic, speed: base.speed + mod.speed,
     extra: base.extra, base, mod,
   };
 }
@@ -349,10 +425,15 @@ function changeLevel(p, delta) {
   if (state.settings.healthOnLevel) bits.push(diff > 0 ? "здоровье +" + diff : "максимум здоровья " + diff);
   return bits.join(", ");
 }
+function shiftAp(p, delta) {
+  if (!delta) return;
+  p.ap = Math.max(0, num(p.ap) + delta);
+}
 function removeCard(p, id) {
   const card = p.cards.find((c) => c.id === id);
   if (!card) return;
   p.cards = p.cards.filter((c) => c.id !== id);
+  shiftAp(p, -num(card.speed));
   if (card.healthMax) {
     p.healthMax = Math.max(1, p.healthMax - card.healthMax);
     if (p.health > p.healthMax) p.health = p.healthMax;
@@ -369,6 +450,11 @@ function applyRecovery() {
   nextPhase();
 }
 function nextPhase() {
+  if (state.game.phase === "villainy") {
+    state.game.fights = [];
+    state.game.counterSeen = false;
+    state.counter = null;
+  }
   const ids = PHASES.map((x) => x[0]);
   const i = ids.indexOf(state.game.phase);
   if (i >= 0 && i < ids.length - 1) state.game.phase = ids[i + 1];
@@ -392,6 +478,9 @@ function endTurn() {
   if (i <= g.active) g.round += 1;
   g.active = i;
   g.phase = "recovery";
+  g.fights = [];
+  g.counterSeen = false;
+  state.counter = null;
 }
 function evaluate() {
   const g = state.game;
@@ -443,6 +532,7 @@ function addQuest(delta) {
   if (info === null) bits.push("уровень уже максимальный");
   else if (info) bits.push(info);
   if (state.game.phase === "deeds" && p.quests < state.settings.questsToWin) state.game.phase = "discard";
+  state.reward = { health: 0, peril: 0, glory: 0, melee: 0 };
   flash(bits.join(". "));
 }
 
@@ -460,8 +550,8 @@ function confirmHtml() {
 }
 function rulesLine() {
   const s = state.settings;
-  const decks = deckTotals(s);
-  return `Победа: ${s.questsToWin} заданий · уровень до ${s.maxLevel} · здоровье за уровень ${s.healthOnLevel ? "включено" : "выключено"} · поверхность ${decks.surface} · подземелье ${decks.dungeon}`;
+  const decks = startingDecks(s);
+  return `Победа: ${s.questsToWin} заданий · уровень до ${s.maxLevel} · здоровье за уровень ${s.healthOnLevel ? "включено" : "выключено"} · поверхность в колоде ${decks.surface} · подземелье ${decks.dungeon}`;
 }
 function levelPreview() {
   const cap = state.settings.maxLevel;
@@ -479,6 +569,7 @@ function statHint(p, key) {
   const bits = [];
   if (st.extra) bits.push("4-й +" + st.extra);
   if (st.mod[key]) bits.push("вещи " + (st.mod[key] > 0 ? "+" : "") + st.mod[key]);
+  if (key === "melee" && p.rewardMelee) bits.push("задания +" + p.rewardMelee);
   return bits.join(" · ");
 }
 
@@ -502,7 +593,7 @@ function screenSettings() {
   <section class="card setting"><h2>Заданий для победы</h2>${stepper(s.questsToWin, "setting", 'data-key="questsToWin"')}<p class="note">Сколько заданий нужно завершить одному герою. В правилах набора это 3.</p></section>
   <section class="card setting"><h2>Максимальный уровень</h2>${stepper(s.maxLevel, "setting", 'data-key="maxLevel"')}${levelPreview()}</section>
   <section class="card setting"><div class="spread"><div><h2>Здоровье за уровень</h2><p class="note">При повышении максимум и текущее здоровье +1. При понижении максимум уменьшается, лишнее текущее срезается. Уже полученные уровни задним числом не пересчитываются.</p></div><button type="button" class="switch ${s.healthOnLevel ? "on" : ""}" data-act="setting" data-key="healthOnLevel" aria-pressed="${s.healthOnLevel}" aria-label="Увеличивать здоровье при повышении уровня"><span></span></button></div></section>
-  <section class="card setting"><h2>Наборов в партии</h2>${stepper(s.sets, "setting", 'data-key="sets"')}<p class="note">Одна игра — колоды как ниже. Вторая игра с тем же числом карт удваивает и поверхность, и подземелье.</p><h2>Поверхность в одном наборе</h2>${stepper(s.surfacePerSet, "setting", 'data-key="surfacePerSet"')}<h2>Подземелье в одном наборе</h2>${stepper(s.dungeonPerSet, "setting", 'data-key="dungeonPerSet"')}<p class="note">В новых партиях будет: поверхность ${deckTotals(s).surface}, подземелье ${deckTotals(s).dungeon}. Пустыня — только поверхность, после входа и дорог обычно 17. Подземный набор впишите во вторую строку и оставьте наборов 1, если он не дублирует пустыню. Уже идущую партию эти цифры не переписывают.</p></section>
+  <section class="card setting"><h2>Наборов в партии</h2>${stepper(s.sets, "setting", 'data-key="sets"')}<p class="note">Одна игра — колоды как ниже. Вторая игра с тем же числом карт удваивает и поверхность, и подземелье.</p><h2>Поверхность в одном наборе</h2>${stepper(s.surfacePerSet, "setting", 'data-key="surfacePerSet"')}<h2>Подземелье в одном наборе</h2>${stepper(s.dungeonPerSet, "setting", 'data-key="dungeonPerSet"')}<p class="note">В новых партиях в колоде будет: поверхность ${startingDecks(s).surface}, подземелье ${startingDecks(s).dungeon}. Пять карт поверхности уже открыты на столе, поэтому они сразу вычтены один раз, даже если наборов два. Подземный набор впишите во вторую строку и оставьте наборов 1, если он не дублирует пустыню. Уже идущую партию эти цифры не переписывают.</p></section>
   </main>`;
 }
 function screenLibrary() {
@@ -561,6 +652,7 @@ function screenPlay() {
     : `<b>${p.quests} / ${s.questsToWin}</b>`;
   const hero = `<section class="card stack"><div class="spread">${face(p.photo, p.heroName, "face-lg")}<div class="stack"><p class="kicker">Раунд ${g.round}${state.die ? " · кубик " + state.die : ""}</p><h2>${esc(p.heroName)}</h2><p class="muted">${esc(p.playerName)}${p.race ? " · " + esc(p.race) : ""}</p>${p.eliminated ? `<b>Выбыл</b>` : ""}</div></div>
     <div class="stats"><div class="stat" data-stat="melee"><b>${st.melee}</b><small>Ближний</small><em>${esc(statHint(p, "melee"))}</em></div><div class="stat" data-stat="magic"><b>${st.magic}</b><small>Магия</small><em>${esc(statHint(p, "magic"))}</em></div><div class="stat" data-stat="speed"><b>${st.speed}</b><small>Скорость</small><em>${esc(statHint(p, "speed"))}</em></div></div>
+    ${heroEffects(p)}
     <div class="spread"><div><p>Уровень <b data-level="${p.level}">${p.level}</b> / ${s.maxLevel}</p><p class="note">${s.maxLevel > 4 ? "Выше 4-го: +1 ко всем за каждый уровень. " : ""}${s.healthOnLevel ? "За уровень +1 к здоровью." : ""}</p></div><div class="row"><button type="button" class="tiny" data-act="level" data-delta="-1">−</button><button type="button" class="tiny" data-act="level" data-delta="1" ${p.level >= s.maxLevel ? "disabled" : ""}>+</button></div></div>
     <div class="spread"><div class="row">${marks}<span>задания ${p.quests}</span></div><button type="button" class="tiny" data-act="quest" data-delta="-1" ${p.quests ? "" : "disabled"}>Снять</button></div>
     <div class="counters">${counter("life", "Здоровье", p.health, "из " + p.healthMax, p.id, "health")}${counter("glory", "Слава", p.glory, "свои карты", p.id, "glory")}${counter("peril", "Риск", p.peril, "тратят соперники", p.id, "peril")}${counter("ap", "Действия", p.ap, p.savedAp ? "ещё 1 вне хода" : "в этот ход", p.id, "ap")}</div>
@@ -571,9 +663,21 @@ function screenPlay() {
   const strip = `<div class="wide stack"><h3>Все герои</h3><div class="heroes">${g.players.map((hero, i) => `<button type="button" class="chip ${i === g.active ? "on" : ""} ${hero.eliminated ? "dead" : ""}" data-act="sheet" data-id="${hero.id}">${face(hero.photo, hero.heroName, "face")}<span><b>${esc(hero.playerName)}</b><small>❤ ${hero.health}/${hero.healthMax} · слава ${hero.glory} · риск ${hero.peril}${hero.savedAp ? " · 1 вне хода" : ""}</small></span></button>`).join("")}</div></div>`;
   return `<main class="wrap stack"><div class="spread"><button type="button" class="tiny" data-act="undo" ${state.history.length ? "" : "disabled"}>Отменить</button><button type="button" class="tiny" data-act="roll">Кубик${state.die ? " " + state.die : ""}</button><button type="button" class="tiny" data-act="menu">Меню</button></div><div class="rail">${rail}</div><div class="play-grid">${hero}${phase}${strip}</div>${overlays()}</main>`;
 }
+function specialText(c) {
+  if (!c.special || !String(c.special.text || "").trim()) return "";
+  return (c.special.stat === "melee" ? "Ближний бой" : "Магия") + ": " + c.special.text.trim();
+}
+function heroEffects(p) {
+  const list = (p.cards || []).filter((c) => specialText(c));
+  if (!list.length) return "";
+  return `<ul class="fx">${list.map((c) => `<li><b>${esc(c.special.stat === "melee" ? "Ближний" : "Магия")}</b> · ${esc(c.name)}: ${esc(c.special.text)}</li>`).join("")}</ul>`;
+}
 function cardsHtml(p) {
   const lim = limitsOf(p);
-  const list = p.cards.map((c) => `<div><span><b>${esc(c.name)}</b><small class="muted"> ${esc(kindName(c.kind))}${c.until === "turn" ? ", до восстановления" : ""}</small></span><button type="button" class="tiny" data-act="drop-card" data-pid="${p.id}" data-cid="${c.id}">Снять</button></div>`).join("");
+  const list = p.cards.map((c) => {
+    const extra = specialText(c);
+    return `<div><span><b>${esc(c.name)}</b><small class="muted"> ${esc(kindName(c.kind))}${c.until === "turn" ? ", до восстановления" : ""}</small>${extra ? `<small class="muted">${esc(extra)}</small>` : ""}</span><button type="button" class="tiny" data-act="drop-card" data-pid="${p.id}" data-cid="${c.id}">Снять</button></div>`;
+  }).join("");
   return `<details><summary>Карты: преимущества ${countKind(p, "boon")}/${lim.boon}, сокровища ${countKind(p, "treasure")}/${lim.treasure}</summary><div class="cards">${list || `<p class="note">Пока нет.</p>`}</div></details>`;
 }
 function kindName(k) { return { boon: "преимущество", treasure: "сокровище", instant: "мгновенная", curse: "эффект" }[k] || k; }
@@ -588,7 +692,7 @@ function phaseBody() {
   ensureDecks(g);
   const p = current();
   const st = statsOf(p);
-  if (g.phase === "recovery") return `<p class="note">Старые очки действия сгорают, в том числе сохранённое на чужой ход. Новые станут равны скорости: <b>${st.speed}</b>.</p>`;
+  if (g.phase === "recovery") return `<p class="note">Старые очки действия сгорают, в том числе сохранённое на чужой ход. Новые станут равны скорости: <b>${st.speed}</b>.</p><div class="spread"><span>Слава</span>${stepper(p.glory, "bump", `data-id="${p.id}" data-key="glory"`)}</div><div class="spread"><span>Риск</span>${stepper(p.peril, "bump", `data-id="${p.id}" data-key="peril"`)}</div><p class="note">Здесь же, без прокрутки к карточке. Минус снимает лишнее.</p>`;
   if (g.phase === "villainy") return villainyBody();
   if (g.phase === "location") {
     const left = g.decks[g.plane];
@@ -597,16 +701,92 @@ function phaseBody() {
   if (g.phase === "deeds") return deedsBody();
   return discardBody();
 }
+function livingFoes() {
+  const me = current();
+  return state.game.players.filter((p) => p.id !== me.id && !p.eliminated);
+}
+function effectsFor(p, stat) {
+  if (!p) return [];
+  return (p.cards || []).filter((c) => c.special && c.special.stat === stat && String(c.special.text || "").trim());
+}
+function effectsBlock(title, cards) {
+  if (!cards.length) return `<p class="fx">${esc(title)}: нет</p>`;
+  return `<div class="fx"><b>${esc(title)}</b><ul>${cards.map((c) => `<li><b>${esc(c.name)}</b> — ${esc(c.special.text)}</li>`).join("")}</ul></div>`;
+}
+function compareLine(mine, theirs) {
+  if (mine > theirs) return "Ваш результат выше на " + (mine - theirs);
+  if (mine < theirs) return "У соперника выше на " + (theirs - mine);
+  return "Поровну";
+}
+function blankFight() {
+  const foes = livingFoes();
+  const foe = foes[0];
+  const me = current();
+  return {
+    foeId: foe ? foe.id : "",
+    stat: "melee",
+    mine: me ? statsOf(me).melee : 0,
+    theirs: foe ? statsOf(foe).melee : 0,
+  };
+}
+function setFightCount(n) {
+  const g = state.game;
+  g.fights = Array.isArray(g.fights) ? g.fights : [];
+  n = clamp(n, 0, 8);
+  while (g.fights.length < n) g.fights.push(blankFight());
+  g.fights.length = n;
+  g.counterSeen = false;
+  state.counter = null;
+  saveGame();
+  render();
+}
+function counterFoes() {
+  return livingFoes().filter((p) => p.savedAp > 0);
+}
+function turnCardsHtml(p) {
+  const temps = (p.cards || []).filter((c) => c.until === "turn");
+  if (!temps.length) return "";
+  const rows = temps.map((c) => {
+    const bits = [];
+    if (c.melee) bits.push("ближний " + (c.melee > 0 ? "+" : "") + c.melee);
+    if (c.magic) bits.push("магия " + (c.magic > 0 ? "+" : "") + c.magic);
+    if (c.speed) bits.push("скорость " + (c.speed > 0 ? "+" : "") + c.speed);
+    if (c.cost) bits.push("слава " + c.cost);
+    const spec = specialText(c);
+    if (spec) bits.push(spec);
+    return `<div><span><b>${esc(c.name)}</b><small class="muted">${esc(bits.join(" · ") || "мгновенно")}</small></span><button type="button" class="tiny" data-act="drop-card" data-pid="${p.id}" data-cid="${c.id}">Снять</button></div>`;
+  }).join("");
+  return `<div class="stack"><p class="note">Мгновенные улучшения — снимите, когда они уже сыграны</p><div class="cards">${rows}</div></div>`;
+}
+function fightHtml() {
+  const g = state.game;
+  const foes = livingFoes();
+  if (!foes.length) return "";
+  const me = current();
+  g.fights = Array.isArray(g.fights) ? g.fights : [];
+  const rows = g.fights.map((f, i) => {
+    const foe = byId(f.foeId) || foes[0];
+    const stat = f.stat === "magic" ? "magic" : "melee";
+    const statName = stat === "magic" ? "магии" : "ближнему бою";
+    const picks = foes.length > 1
+      ? `<div class="row">${foes.map((p) => `<button type="button" class="tiny ${p.id === foe.id ? "gold" : ""}" data-act="fight-foe" data-i="${i}" data-id="${p.id}">${esc(p.heroName)}</button>`).join("")}</div>`
+      : `<p><b>${esc(foe.heroName)}</b></p>`;
+    return `<article class="fight"><h3>Бой ${i + 1}</h3>${picks}<div class="row"><button type="button" class="tiny ${stat === "melee" ? "gold" : ""}" data-act="fight-stat" data-i="${i}" data-stat="melee">Ближний бой</button><button type="button" class="tiny ${stat === "magic" ? "gold" : ""}" data-act="fight-stat" data-i="${i}" data-stat="magic">Магия</button></div><div class="spread"><span>У меня</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="-1">−</button><b>${f.mine}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="1">+</button></div></div><div class="spread"><span>У соперника</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="-1">−</button><b>${f.theirs}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="1">+</button></div></div><p class="compare">${compareLine(Number(f.mine) || 0, Number(f.theirs) || 0)}</p>${effectsBlock("Ваши эффекты по " + statName, effectsFor(me, stat))}${effectsBlock("Эффекты соперника по " + statName, effectsFor(foe, stat))}</article>`;
+  }).join("");
+  const played = g.fights.length ? `<button type="button" class="btn gold block" data-act="cards-played">Карты злодеяний отыграны</button><p class="note">После этого, если у соперника сохранено действие, откроется контратака.</p>` : "";
+  return `<div class="stack"><h3>Карты злодеяний</h3>${stepper(g.fights.length, "fight-count")}<p class="note">Сколько карт разыгрываете. По каждой — своё сравнение: выберите характеристику и поправьте числа после кубиков.</p>${rows}${played}</div>`;
+}
 function villainyBody() {
   const g = state.game;
   const me = current();
-  const foes = g.players.filter((p) => p.id !== me.id && !p.eliminated);
+  const foes = livingFoes();
   const any = foes.some((p) => p.peril > 0);
   const blocks = foes.map((p) => {
     const pay = g.pay[p.id] || 1;
-    return `<article class="foe">${face(p.photo, p.heroName, "face")}<div class="stack" style="flex:1"><b>${esc(p.heroName)}</b><span class="muted">${esc(p.playerName)} · риск <b data-foe-peril="${p.id}">${p.peril}</b> · здоровье ${p.health}</span><div class="stepper"><button type="button" data-act="pay" data-id="${p.id}" data-delta="-1">−</button><b>${pay}</b><button type="button" data-act="pay" data-id="${p.id}" data-delta="1">+</button></div><button type="button" class="btn gold" data-act="spend" data-id="${p.id}">Списать его риск</button><div class="row"><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="-1">Рана</button><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="1">Лечение</button><button type="button" class="tiny" data-act="grant-peril" data-id="${p.id}">+1 риск</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="curse">Эффект</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="instant">Его ответ</button></div></div></article>`;
+    const st = statsOf(p);
+    return `<article class="foe">${face(p.photo, p.heroName, "face")}<div class="stack" style="flex:1"><b>${esc(p.heroName)}</b><span class="muted">${esc(p.playerName)} · риск <b data-foe-peril="${p.id}">${p.peril}</b> · здоровье ${p.health}${p.savedAp ? " · действие на контратаку" : ""}</span><p class="brief"><span>ближний <b>${st.melee}</b></span><span>магия <b>${st.magic}</b></span><span>слава <b>${p.glory}</b></span>${p.savedAp ? `<span>контратака</span>` : ""}</p>${turnCardsHtml(p)}<div class="stepper"><button type="button" data-act="pay" data-id="${p.id}" data-delta="-1">−</button><b>${pay}</b><button type="button" data-act="pay" data-id="${p.id}" data-delta="1">+</button></div><button type="button" class="btn gold" data-act="spend" data-id="${p.id}">Списать его риск</button><div class="row"><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="-1">Рана</button><button type="button" class="tiny" data-act="bump" data-id="${p.id}" data-key="health" data-delta="1">Лечение</button><button type="button" class="tiny" data-act="grant-peril" data-id="${p.id}">+1 риск</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="curse">Эффект</button><button type="button" class="tiny" data-act="open-card" data-id="${p.id}" data-kind="instant">Его ответ</button></div></div></article>`;
   }).join("");
-  return `<p class="note">Спишите риск одного соперника на проклятие или столкновение. Одну карту нельзя оплатить двоими. Свой риск тратить нельзя.</p>${any ? "" : `<p class="note">Ни у кого из соперников нет риска — фазу можно пропустить.</p>`}<div class="stack">${blocks}</div><div class="row"><button type="button" class="tiny" data-act="grant-glory">+1 слава за рану монстру</button><button type="button" class="tiny" data-act="grant-peril" data-id="${me.id}">+1 риск себе</button></div>`;
+  return `<p class="note">Спишите риск одного соперника на проклятие или столкновение. Одну карту нельзя оплатить двоими. Свой риск тратить нельзя. Слава соперника — на случай зелья.</p>${any ? "" : `<p class="note">Ни у кого из соперников нет риска — фазу можно пропустить.</p>`}<div class="stack">${blocks}</div>${fightHtml()}<div class="row"><button type="button" class="tiny" data-act="grant-glory">+1 слава за рану монстру</button><button type="button" class="tiny" data-act="grant-peril" data-id="${me.id}">+1 риск себе</button></div>`;
 }
 function deedsBody() {
   const g = state.game;
@@ -644,7 +824,20 @@ function phaseButtons() {
   return `<button type="button" class="btn gold block" data-act="finish">Готово</button><button type="button" class="btn ghost block" data-act="skip">Пропустить</button>`;
 }
 function overlays() {
-  return menuHtml() + sheetHtml() + cardHtml() + victoryHtml();
+  return menuHtml() + sheetHtml() + cardHtml() + victoryHtml() + rewardHtml() + counterHtml();
+}
+function counterHtml() {
+  if (!state.counter || !state.game) return "";
+  const foes = counterFoes();
+  if (!foes.length) return "";
+  const rows = foes.map((p) => `<article class="fight"><h3>${esc(p.heroName)}</h3><p class="note">${esc(p.playerName)} сохранил действие. Успех — рана монстру и слава +1 ему. Провал — без награды, действие всё равно потрачено.</p><div class="row"><button type="button" class="btn gold" data-act="counter" data-id="${p.id}" data-result="hit">Успех — рана монстру</button><button type="button" class="btn" data-act="counter" data-id="${p.id}" data-result="miss">Провал — пропуск</button></div></article>`).join("");
+  return `<div class="modal reward"><div class="stack"><h2>Контратака</h2>${rows}</div></div>`;
+}
+function rewardHtml() {
+  if (!state.reward || !state.game) return "";
+  const r = state.reward;
+  const step = (key, label) => `<div class="spread"><span>${label}</span><div class="stepper"><button type="button" data-act="reward" data-key="${key}" data-delta="-1">−</button><b>${r[key] || 0}</b><button type="button" data-act="reward" data-key="${key}" data-delta="1">+</button></div></div>`;
+  return `<div class="modal reward"><div class="stack"><h2>Награда задания</h2><p class="note">Что герой получил за задание. Ноль — ничего не прибавлять. Ближний бой остаётся на герое.</p>${step("health", "Здоровье")}${step("peril", "Риск")}${step("glory", "Слава")}${step("melee", "Ближний бой")}<button type="button" class="btn gold block" data-act="apply-reward">Применить</button><button type="button" class="btn ghost block" data-act="skip-reward">Без награды</button></div></div>`;
 }
 function menuHtml() {
   if (!state.menu) return "";
@@ -659,9 +852,16 @@ function cardHtml() {
   const m = state.modal;
   if (!m) return "";
   const step = (key, label) => `<div class="spread"><span>${label}</span><div class="stepper"><button type="button" data-act="mod" data-key="${key}" data-delta="-1">−</button><b>${m[key]}</b><button type="button" data-act="mod" data-key="${key}" data-delta="1">+</button></div></div>`;
+  const special = (m.kind === "boon" || m.kind === "treasure")
+    ? `<div class="spread"><span>Особый эффект</span><button type="button" class="switch ${m.specialOn ? "on" : ""}" data-act="special-toggle" aria-pressed="${m.specialOn ? "true" : "false"}" aria-label="Особый эффект"><span></span></button></div>${m.specialOn ? `<div class="row"><button type="button" class="tiny ${m.specialStat === "melee" ? "gold" : ""}" data-act="special-stat" data-stat="melee">Ближний бой</button><button type="button" class="tiny ${m.specialStat === "magic" ? "gold" : ""}" data-act="special-stat" data-stat="magic">Магия</button></div><label class="field">Что делает<textarea data-bind="modal.specialText" placeholder="два кубика, взять высший">${esc(m.specialText || "")}</textarea></label>` : ""}`
+    : "";
   const kinds = [["boon", "Преимущество"], ["treasure", "Сокровище"], ["instant", "Мгновенная"], ["curse", "Эффект"]].map(([id, name]) => `<button type="button" class="tiny ${m.kind === id ? "gold" : ""}" data-act="kind" data-kind="${id}">${name}</button>`).join("");
   const who = state.game.players.map((p) => `<option value="${p.id}" ${p.id === m.targetId ? "selected" : ""}>${esc(p.heroName)}</option>`).join("");
-  return `<div class="modal"><div class="stack"><div class="spread"><h2>Карта или эффект</h2><button type="button" class="tiny" data-act="close-card">Закрыть</button></div><div class="row">${kinds}</div><label class="field">Название<input data-bind="modal.name" value="${esc(m.name)}"></label>${m.kind === "treasure" ? `<label class="field">Тип сокровища<input data-bind="modal.typeName" value="${esc(m.typeName)}" placeholder="шлем, плащ…"></label>` : ""}${m.kind === "curse" ? `<label class="field">На кого<select data-bind="modal.targetId">${who}</select></label>` : ""}${m.kind !== "curse" ? step("cost", "Цена в славе") : ""}<div class="row"><button type="button" class="tiny ${m.until === "permanent" ? "gold" : ""}" data-act="until" data-until="permanent">Постоянная</button><button type="button" class="tiny ${m.until === "turn" ? "gold" : ""}" data-act="until" data-until="turn">До восстановления</button></div>${step("melee", "Ближний")}${step("magic", "Магия")}${step("speed", "Скорость")}${step("heal", "Лечение сейчас")}${step("healthMax", "Максимум здоровья")}${step("boonLimit", "Предел преимуществ")}${step("treasureLimit", "Предел сокровищ")}<button type="button" class="btn gold block" data-act="play-card">Сыграть</button></div></div>`;
+  const book = (m.kind === "boon" || m.kind === "treasure") ? savedCards(m.kind) : [];
+  const known = book.length
+    ? `<label class="field">Сохранённые<select data-fill-card><option value="">Выбрать и подставить статы</option>${book.map((c) => { const extra = cardBits(c).join(", "); return `<option value="${esc(c.id)}">${esc(c.name)}${extra ? " · " + esc(extra) : ""}</option>`; }).join("")}</select></label><datalist id="known-cards">${book.map((c) => `<option value="${esc(c.name)}"></option>`).join("")}</datalist>`
+    : "";
+  return `<div class="modal"><div class="stack"><div class="spread"><h2>Карта или эффект</h2><button type="button" class="tiny" data-act="close-card">Закрыть</button></div><div class="row">${kinds}</div>${known}<label class="field">Название<input data-bind="modal.name" list="known-cards" value="${esc(m.name)}" autocomplete="off"></label>${m.kind === "treasure" ? `<label class="field">Тип сокровища<input data-bind="modal.typeName" value="${esc(m.typeName)}" placeholder="шлем, плащ…"></label>` : ""}${m.kind === "curse" ? `<label class="field">На кого<select data-bind="modal.targetId">${who}</select></label>` : ""}${m.kind !== "curse" ? step("cost", "Цена в славе") : ""}<div class="row"><button type="button" class="tiny ${m.until === "permanent" ? "gold" : ""}" data-act="until" data-until="permanent">Постоянная</button><button type="button" class="tiny ${m.until === "turn" ? "gold" : ""}" data-act="until" data-until="turn">До восстановления</button></div>${step("melee", "Ближний")}${step("magic", "Магия")}${step("speed", "Скорость")}${step("heal", "Лечение сейчас")}${step("healthMax", "Максимум здоровья")}${step("boonLimit", "Предел преимуществ")}${step("treasureLimit", "Предел сокровищ")}${special}<button type="button" class="btn gold block" data-act="play-card">Сыграть</button></div></div>`;
 }
 function victoryHtml() {
   const g = state.game;
@@ -716,6 +916,9 @@ function modalCard() {
     melee: m.melee || 0, magic: m.magic || 0, speed: m.speed || 0,
     heal: m.heal || 0, healthMax: m.healthMax || 0, boonLimit: m.boonLimit || 0, treasureLimit: m.treasureLimit || 0,
     cost: Math.max(0, m.cost || 0),
+    special: (m.kind === "boon" || m.kind === "treasure") && m.specialOn && String(m.specialText || "").trim()
+      ? { stat: m.specialStat === "melee" ? "melee" : "magic", text: String(m.specialText).trim() }
+      : null,
   };
 }
 function playModal() {
@@ -729,7 +932,13 @@ function playModal() {
   if (target.health > target.healthMax) target.health = target.healthMax;
   if (target.health < 0) target.health = 0;
   target.cards.push(card);
+  shiftAp(target, num(card.speed));
+  const remembered = rememberCard(card);
+  const bits = cardBits(card);
+  if (num(card.speed)) bits.push("действия " + (num(card.speed) > 0 ? "+" : "") + num(card.speed));
+  if (remembered === "new") bits.push("название сохранено");
   state.modal = null;
+  if (bits.length) flash(bits.join(", "));
 }
 function makePlayer(seat, hero) {
   return {
@@ -739,7 +948,7 @@ function makePlayer(seat, hero) {
     baseHealth: Number(hero.health), baseBoon: Number(hero.boonLimit), baseTreasure: Number(hero.treasureLimit),
     level: 1, health: Number(hero.health), healthMax: Number(hero.health), glory: 1, peril: 1,
     ap: 0, savedAp: 0, quests: 0, moved: false, stayTaken: false, fallen: false, eliminated: false,
-    abilityUsed: false, hand: 5, cards: [],
+    abilityUsed: false, hand: 5, cards: [], rewardMelee: 0,
   };
 }
 function openForm(hero, back) {
@@ -841,8 +1050,8 @@ const actions = {
     if (new Set(setup.seats.map((s) => s.heroId)).size !== setup.seats.length) { flash("Один герой не может сидеть дважды"); return; }
     state.game = {
       players: setup.seats.map((seat) => makePlayer(seat, state.heroes.find((h) => h.id === seat.heroId))),
-      active: setup.first, phase: "recovery", round: 1, decks: deckTotals(state.settings), plane: "surface", locationsLeft: deckTotals(state.settings).surface + deckTotals(state.settings).dungeon,
-      prompt: null, stay: { glory: 0, peril: 0 }, saveAp: false, pay: {}, victory: null,
+      active: setup.first, phase: "recovery", round: 1, decks: startingDecks(state.settings), plane: "surface", locationsLeft: startingDecks(state.settings).surface + startingDecks(state.settings).dungeon,
+      prompt: null, stay: { glory: 0, peril: 0 }, saveAp: false, pay: {}, fights: [], victory: null,
     };
     state.history = [];
     saveGame();
@@ -853,6 +1062,8 @@ const actions = {
     if (!prev) return;
     state.game = prev;
     state.menu = false;
+    state.reward = null;
+    state.counter = null;
     saveGame();
     render();
   },
@@ -865,6 +1076,11 @@ const actions = {
     const phase = state.game.phase;
     ensureDecks(state.game);
     if (phase === "location" && state.game.decks[state.game.plane] <= 0) { flash("Эта колода пуста — переключите ползунок или пропустите"); return; }
+    if (phase === "villainy" && (state.game.fights || []).length > 0 && !state.game.counterSeen && counterFoes().length) {
+      state.counter = true;
+      render();
+      return;
+    }
     commit(() => {
       if (phase === "recovery") applyRecovery();
       else if (phase === "location") { drawLocation(state.game); nextPhase(); }
@@ -896,6 +1112,31 @@ const actions = {
   bump(btn) { commit(() => bump(byId(btn.dataset.id), btn.dataset.key, Number(btn.dataset.delta))); },
   "grant-peril"(btn) { commit(() => { byId(btn.dataset.id).peril += 1; }); },
   "grant-glory"() { commit(() => { current().glory += 1; }); },
+  "cards-played"() {
+    if (!counterFoes().length) {
+      state.game.counterSeen = true;
+      state.counter = null;
+      saveGame();
+      flash("Сохранённых действий для контратаки нет");
+      return;
+    }
+    state.counter = true;
+    render();
+  },
+  counter(btn) {
+    const foe = byId(btn.dataset.id);
+    if (!foe) return;
+    const hit = btn.dataset.result === "hit";
+    commit(() => {
+      foe.savedAp = 0;
+      if (hit) foe.glory += 1;
+      if (!counterFoes().length) {
+        state.counter = null;
+        state.game.counterSeen = true;
+      }
+    });
+    flash(hit ? foe.heroName + ": рана монстру, слава +1" : foe.heroName + ": пропуск, без награды");
+  },
   level(btn) {
     const delta = Number(btn.dataset.delta);
     commit(() => {
@@ -906,6 +1147,57 @@ const actions = {
     });
   },
   quest(btn) { commit(() => addQuest(Number(btn.dataset.delta))); },
+  reward(btn) {
+    const r = state.reward;
+    if (!r) return;
+    r[btn.dataset.key] = clamp((r[btn.dataset.key] || 0) + Number(btn.dataset.delta), 0, 20);
+    render();
+  },
+  "skip-reward"() { state.reward = null; render(); },
+  "apply-reward"() {
+    const r = state.reward || { health: 0, peril: 0, glory: 0, melee: 0 };
+    const p = current();
+    state.reward = null;
+    if (!p || !(r.health || r.peril || r.glory || r.melee)) { render(); return; }
+    const room = p.healthMax - p.health;
+    commit(() => {
+      p.health = clamp(p.health + (r.health || 0), 0, p.healthMax);
+      p.peril = Math.max(0, p.peril + (r.peril || 0));
+      p.glory = Math.max(0, p.glory + (r.glory || 0));
+      p.rewardMelee = Math.max(0, (p.rewardMelee || 0) + (r.melee || 0));
+    });
+    if ((r.health || 0) > room) flash("Здоровье упёрлось в максимум. Поднимите максимум, если награда больше.");
+  },
+  "fight-count"(btn) { setFightCount((state.game.fights || []).length + Number(btn.dataset.delta)); },
+  "fight-stat"(btn) {
+    const f = (state.game.fights || [])[Number(btn.dataset.i)];
+    if (!f) return;
+    f.stat = btn.dataset.stat === "magic" ? "magic" : "melee";
+    const me = current();
+    const foe = byId(f.foeId);
+    if (me) f.mine = statsOf(me)[f.stat];
+    if (foe) f.theirs = statsOf(foe)[f.stat];
+    saveGame();
+    render();
+  },
+  "fight-foe"(btn) {
+    const f = (state.game.fights || [])[Number(btn.dataset.i)];
+    if (!f) return;
+    f.foeId = btn.dataset.id;
+    const foe = byId(f.foeId);
+    const stat = f.stat === "magic" ? "magic" : "melee";
+    if (foe) f.theirs = statsOf(foe)[stat];
+    saveGame();
+    render();
+  },
+  "fight-mod"(btn) {
+    const f = (state.game.fights || [])[Number(btn.dataset.i)];
+    if (!f) return;
+    const key = btn.dataset.key === "theirs" ? "theirs" : "mine";
+    f[key] = Math.max(0, (Number(f[key]) || 0) + Number(btn.dataset.delta));
+    saveGame();
+    render();
+  },
   ability() { commit(() => { current().abilityUsed = !current().abilityUsed; }); },
   move() {
     const p = current();
@@ -941,6 +1233,7 @@ const actions = {
       name: "", kind, typeName: "", cost: kind === "curse" ? 0 : 1,
       until: kind === "instant" || kind === "curse" ? "turn" : "permanent",
       melee: 0, magic: 0, speed: 0, heal: 0, healthMax: 0, boonLimit: 0, treasureLimit: 0,
+      specialOn: false, specialStat: "magic", specialText: "",
       targetId: btn.dataset.id || current().id,
     };
     render();
@@ -953,6 +1246,8 @@ const actions = {
   },
   until(btn) { if (state.modal.kind !== "instant") { state.modal.until = btn.dataset.until; render(); } },
   mod(btn) { state.modal[btn.dataset.key] = (state.modal[btn.dataset.key] || 0) + Number(btn.dataset.delta); render(); },
+  "special-toggle"() { state.modal.specialOn = !state.modal.specialOn; render(); },
+  "special-stat"(btn) { state.modal.specialStat = btn.dataset.stat === "melee" ? "melee" : "magic"; render(); },
   "play-card"() {
     const problem = cardProblem();
     if (problem) { flash(problem); return; }
@@ -992,6 +1287,12 @@ function startSetup() {
 function onInput(e) {
   const el = e.target;
   if (el.dataset.flag === "saveAp" && state.game) { state.game.saveAp = el.checked; return; }
+  if (el.dataset.fillCard != null && state.modal) {
+    const found = loadCardBook().find((c) => c.id === el.value);
+    if (found) applySavedCard(found);
+    render();
+    return;
+  }
   if (!el.dataset.bind) return;
   let value = el.value;
   if (el.dataset.num) {
@@ -1000,7 +1301,13 @@ function onInput(e) {
   }
   const path = el.dataset.bind;
   if (path.startsWith("draft.")) setPath(state.draft, path.slice(6), value);
-  else if (path.startsWith("modal.")) setPath(state.modal, path.slice(6), value);
+  else if (path.startsWith("modal.")) {
+    setPath(state.modal, path.slice(6), value);
+    if (e.type === "change" && path === "modal.name" && (state.modal.kind === "boon" || state.modal.kind === "treasure")) {
+      const found = savedCards(state.modal.kind).find((c) => c.name.toLowerCase() === String(value).trim().toLowerCase());
+      if (found) { applySavedCard(found); render(); }
+    }
+  }
   else if (path.startsWith("seat.")) {
     const parts = path.split(".");
     state.setup.seats[Number(parts[1])][parts[2]] = value;
