@@ -667,6 +667,7 @@ function applyRecovery() {
   p.peril += Math.max(0, num(gain.peril));
   dropTurnCards(p);
   p.ap = Math.max(0, statsOf(p).speed);
+  if (p.escort && p.escort.on) p.escort.apShift = num(p.escort.speed);
   p.savedAp = 0;
   p.moved = false;
   p.stayTaken = false;
@@ -880,7 +881,7 @@ function screenPlay() {
     : `<b>${p.quests} / ${s.questsToWin}</b>`;
   const hero = `<section class="card stack"><div class="spread">${face(p.photo, p.heroName, "face-lg")}<div class="stack"><p class="kicker">Раунд ${g.round}${state.die ? " · кубик " + state.die : ""}</p><h2>${esc(p.heroName)}</h2><p class="muted">${esc(p.playerName)}${p.race ? " · " + esc(p.race) : ""}</p>${p.eliminated ? `<b>Выбыл</b>` : ""}</div></div>
     <div class="stats"><div class="stat" data-stat="melee"><b>${st.melee}</b><small>Ближний</small><em>${esc(statHint(p, "melee"))}</em></div><div class="stat" data-stat="magic"><b>${st.magic}</b><small>Магия</small><em>${esc(statHint(p, "magic"))}</em></div><div class="stat" data-stat="speed"><b>${st.speed}</b><small>Скорость</small><em>${esc(statHint(p, "speed"))}</em></div></div>
-    ${p.escort && p.escort.on && g.phase !== "deeds" ? `<button type="button" class="btn gold block" data-act="escort-end">Закончить сопровождение</button>` : ""}
+    ${escortPanel(p)}
     ${heroEffects(p)}
     <div class="spread"><div><p>Уровень <b data-level="${p.level}">${p.level}</b> / ${s.maxLevel}</p><p class="note">${s.maxLevel > 4 ? "Выше 4-го: +1 ко всем за каждый уровень. " : ""}${s.healthOnLevel ? "За уровень +1 к здоровью." : ""}</p></div><div class="row"><button type="button" class="tiny" data-act="level" data-delta="-1">−</button><button type="button" class="tiny" data-act="level" data-delta="1" ${p.level >= s.maxLevel ? "disabled" : ""}>+</button></div></div>
     <div class="spread"><div class="row">${marks}<span>задания ${p.quests}</span></div><button type="button" class="tiny" data-act="quest" data-delta="-1" ${p.quests ? "" : "disabled"}>Снять</button></div>
@@ -889,7 +890,7 @@ function screenPlay() {
     ${p.ability ? `<details><summary>Умение</summary><p class="note">${esc(p.ability)}</p><button type="button" class="tiny" data-act="ability">${p.abilityUsed ? "Уже использовано" : "Отметить использование"}</button></details>` : ""}
     ${cardsHtml(p)}</section>`;
   const phase = `<section class="card stack" data-phase="${g.phase}"><h2>${esc(PHASES.find((x) => x[0] === g.phase)[1])}</h2>${phaseBody()}${phaseButtons()}</section>`;
-  const strip = `<div class="wide stack"><h3>Все герои</h3><div class="heroes">${g.players.map((hero, i) => `<button type="button" class="chip ${i === g.active ? "on" : ""} ${hero.eliminated ? "dead" : ""}" data-act="sheet" data-id="${hero.id}">${face(hero.photo, hero.heroName, "face")}<span><b>${esc(hero.playerName)}</b><small>❤ ${hero.health}/${hero.healthMax} · слава ${hero.glory} · риск ${hero.peril}${hero.savedAp ? " · 1 вне хода" : ""}</small></span></button>`).join("")}</div></div>`;
+  const strip = `<div class="wide stack"><h3>Все герои</h3><div class="heroes">${g.players.map((hero, i) => `<button type="button" class="chip ${i === g.active ? "on" : ""} ${hero.eliminated ? "dead" : ""}" data-act="sheet" data-id="${hero.id}">${face(hero.photo, hero.heroName, "face")}<span><b>${esc(hero.playerName)}</b><small>❤ ${hero.health}/${hero.healthMax} · слава ${hero.glory} · риск ${hero.peril}${hero.savedAp ? " · 1 вне хода" : ""}${hero.escort && hero.escort.on ? " · жетон" : ""}</small></span></button>`).join("")}</div></div>`;
   return `<main class="wrap stack"><div class="spread"><button type="button" class="tiny" data-act="undo" ${state.history.length ? "" : "disabled"}>Отменить</button><button type="button" class="tiny" data-act="roll">Кубик${state.die ? " " + state.die : ""}</button><button type="button" class="tiny" data-act="menu">Меню</button></div><div class="rail">${rail}</div><div class="play-grid">${hero}${phase}${strip}</div>${overlays()}</main>`;
 }
 function specialText(c) {
@@ -1070,18 +1071,28 @@ function deedsBody() {
   if (g.prompt && g.prompt.type === "move") {
     prompt = `<div class="card stack"><p>Новая локация?</p><p class="note">Слава и риск с карты локации. Если здесь уже были в этот ход — ничего не берите.</p><div class="row"><span>Слава</span>${stepper(g.prompt.glory, "prompt", 'data-key="glory"')}</div><div class="row"><span>Риск</span>${stepper(g.prompt.peril, "prompt", 'data-key="peril"')}</div><div class="row"><button type="button" class="btn gold" data-act="move-new">Забрать</button><button type="button" class="btn" data-act="move-old">Уже был</button><button type="button" class="btn ghost" data-act="move-cancel">Отмена хода</button></div></div>`;
   }
-  const escortOn = p.escort && p.escort.on;
-  const escort = escortOn
-    ? `<div class="stack"><p>Сопровождение</p><p class="note">Плюс или минус к статам на время задания. Минус — ограничение. Скорость сразу меняет текущие действия. Когда закончите, поправки снимутся и задание засчитается.</p><div class="spread"><span>Ближний бой</span>${stepper(num(p.escort.melee), "escort", 'data-key="melee"')}</div><div class="spread"><span>Скорость, действия</span>${stepper(num(p.escort.speed), "escort", 'data-key="speed"')}</div><div class="spread"><span>Магия</span>${stepper(num(p.escort.magic), "escort", 'data-key="magic"')}</div><button type="button" class="btn gold block" data-act="escort-end">${win ? "Закончить сопровождение — задание выполнено" : "Закончить сопровождение"}</button></div>`
-    : `<button type="button" class="btn block" data-act="escort-start">Начать сопровождение</button><button type="button" class="btn block" data-act="quest" data-delta="1">${win ? "Задание выполнено — победа" : "Задание выполнено"}</button>`;
+  const escort = p.escort && p.escort.on
+    ? `<p class="note">Жетон сопровождения уже на герое. Играйте следующие ходы как обычно и сбросьте его на нужной локации.</p>`
+    : `<button type="button" class="btn block" data-act="escort-start">Начать сопровождение</button>`;
   return `${p.fallen ? `<p class="note">Герой лежит и не может двигаться. Очко действия уходит на подъём.</p><button type="button" class="btn gold" data-act="stand">Встать</button>` : ""}
   <div class="row"><button type="button" class="btn" data-act="move">Перемещение −1</button><button type="button" class="btn" data-act="explore">Исследовать −1</button><button type="button" class="btn" data-act="fall">${p.fallen ? "Уже лежит" : "Упал"}</button></div>
   ${prompt}
   <button type="button" class="btn gold block" data-act="open-card" data-id="${p.id}" data-kind="boon">Карта славы</button>
   ${escort}
+  <button type="button" class="btn block" data-act="quest" data-delta="1">${win ? "Задание выполнено — победа" : "Задание выполнено"}</button>
   <p class="note">Движение, исследование, карты славы и задания можно мешать. После задания фаза подвигов продолжается. Первая попытка задания за ход не тратит действие.</p>
   ${planeToggle()}
   <p class="note">Исследование берёт карту оттуда, где герой: ${planeLabel(g.plane).toLowerCase()}, осталось ${g.decks[g.plane]}.</p>`;
+}
+function signed(n) { n = num(n); return (n > 0 ? "+" : "") + n; }
+function escortPanel(p) {
+  const e = p.escort && p.escort.on ? p.escort : null;
+  if (!e) return "";
+  const summary = `ближний ${signed(e.melee)} · скорость ${signed(e.speed)} · магия ${signed(e.magic)}`;
+  const form = e.editing
+    ? `<p class="note">Введите поправки этой миссии. Потом закрепите жетон и играйте дальше: он останется на герое несколько ходов, пока не дойдёте до точки сброса.</p><div class="spread"><span>Ближний бой</span>${stepper(num(e.melee), "escort", 'data-key="melee"')}</div><div class="spread"><span>Скорость, действия</span>${stepper(num(e.speed), "escort", 'data-key="speed"')}</div><div class="spread"><span>Магия</span>${stepper(num(e.magic), "escort", 'data-key="magic"')}</div><button type="button" class="btn block" data-act="escort-pin">Закрепить жетон</button>`
+    : `<p class="note">Жетон закреплён. ${summary}. Статы держатся, пока не сбросите жетон на нужной локации.</p><button type="button" class="tiny" data-act="escort-edit">Поправить статы</button>`;
+  return `<div class="stack"><p><b>Жетон сопровождения</b></p>${form}<button type="button" class="btn gold block" data-act="escort-end">Сбросить жетон</button></div>`;
 }
 function discardBody() {
   const g = state.game;
@@ -1364,7 +1375,6 @@ const actions = {
     const phase = state.game.phase;
     ensureDecks(state.game);
     if (phase === "location" && state.game.decks[state.game.plane] <= 0) { flash("Эта колода пуста — переключите ползунок или пропустите"); return; }
-    if (phase === "deeds" && current().escort && current().escort.on) { flash("Сначала закончите сопровождение: поправки снимутся, и задание засчитается"); return; }
     if (phase === "villainy" && (state.game.fights || []).length > 0 && !state.game.counterSeen && counterFoes().length) {
       state.counter = true;
       render();
@@ -1377,10 +1387,7 @@ const actions = {
       else nextPhase();
     });
   },
-  skip() {
-    if (state.game.phase === "deeds" && current().escort && current().escort.on) { flash("Сначала закончите сопровождение: поправки снимутся, и задание засчитается"); return; }
-    commit(() => { if (state.game.phase === "recovery") dropTurnCards(current()); if (state.game.phase === "discard") endTurn(); else nextPhase(); });
-  },
+  skip() { commit(() => { if (state.game.phase === "recovery") dropTurnCards(current()); if (state.game.phase === "discard") endTurn(); else nextPhase(); }); },
   plane(btn) {
     ensureDecks(state.game);
     state.game.plane = btn.dataset.plane === "dungeon" ? "dungeon" : "surface";
@@ -1460,7 +1467,21 @@ const actions = {
   "escort-start"() {
     const p = current();
     if (p.escort && p.escort.on) return;
-    commit(() => { p.escort = { on: true, melee: 0, magic: 0, speed: 0, apShift: 0 }; });
+    commit(() => { p.escort = { on: true, editing: true, melee: 0, magic: 0, speed: 0, apShift: 0 }; });
+  },
+  "escort-pin"() {
+    const p = current();
+    if (!p.escort || !p.escort.on) return;
+    p.escort.editing = false;
+    saveGame();
+    render();
+  },
+  "escort-edit"() {
+    const p = current();
+    if (!p.escort || !p.escort.on) return;
+    p.escort.editing = true;
+    saveGame();
+    render();
   },
   escort(btn) {
     const p = current();
