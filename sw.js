@@ -1,8 +1,8 @@
-const CACHE = "dungeoneer-v18";
+const CACHE = "dungeoneer-v19";
 const ASSETS = [
   "./index.html",
-  "./css/app.css?v=18",
-  "./js/app.js?v=18",
+  "./css/app.css?v=19",
+  "./js/app.js?v=19",
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png",

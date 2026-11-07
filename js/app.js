@@ -618,11 +618,12 @@ function bindCropper() {
 
 function current() { return state.game.players[state.game.active]; }
 function byId(id) { return state.game.players.find((p) => p.id === id); }
-function printed(p) {
-  const row = p.cardStats[Math.min(p.level, 4) - 1];
-  const extra = Math.max(0, p.level - 4);
+function printedAt(p, level) {
+  const row = p.cardStats[Math.min(level, 4) - 1];
+  const extra = Math.max(0, level - 4);
   return { melee: row.melee + extra, magic: row.magic + extra, speed: row.speed + extra, extra, row };
 }
+function printed(p) { return printedAt(p, p.level); }
 function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 function itemMods(p) {
   return (p.cards || []).reduce((m, c) => ({
@@ -636,7 +637,7 @@ function statsOf(p) {
   return {
     melee: base.melee + mod.melee + (p.rewardMelee || 0) + (escort ? num(escort.melee) : 0),
     magic: base.magic + mod.magic + (escort ? num(escort.magic) : 0),
-    speed: base.speed + mod.speed + (p.rewardSpeed || 0) + (escort ? num(escort.speed) : 0),
+    speed: base.speed + mod.speed + (p.rewardSpeed || 0) + (escort ? num(escort.speed) : 0) - (p.levelSpeedHold || 0),
     extra: base.extra, base, mod, escort,
   };
 }
@@ -663,9 +664,13 @@ function changeLevel(p, delta) {
     p.healthMax = Math.max(1, p.healthMax + diff);
     if (p.health > p.healthMax) p.health = p.healthMax;
   }
+  const speedGain = printedAt(p, next).speed - printedAt(p, was).speed;
+  if (speedGain > 0) p.levelSpeedHold = (p.levelSpeedHold || 0) + speedGain;
+  else if (speedGain < 0) p.levelSpeedHold = Math.max(0, (p.levelSpeedHold || 0) + speedGain);
   const extraNow = Math.max(0, next - 4);
   const extraWas = Math.max(0, was - 4);
   const bits = [];
+  if (speedGain > 0) bits.push("скорость +" + speedGain + " со следующего хода");
   if (extraNow !== extraWas) {
     bits.push(extraNow ? "сверх 4-го уровня +" + extraNow + " ко всем характеристикам" : "характеристики снова как на 4-м уровне карточки");
   }
@@ -693,6 +698,11 @@ function applyRecovery() {
   p.glory += Math.max(0, num(gain.glory));
   p.peril += Math.max(0, num(gain.peril));
   dropTurnCards(p);
+  if (p.pendingRewardSpeed) {
+    p.rewardSpeed = (p.rewardSpeed || 0) + p.pendingRewardSpeed;
+    p.pendingRewardSpeed = 0;
+  }
+  p.levelSpeedHold = 0;
   p.ap = Math.max(0, statsOf(p).speed);
   if (p.escort && p.escort.on) p.escort.apShift = num(p.escort.speed);
   p.savedAp = 0;
@@ -822,10 +832,15 @@ function levelPreview() {
 function statHint(p, key) {
   const st = statsOf(p);
   const bits = [];
-  if (st.extra) bits.push("4-й +" + st.extra);
+  if (key === "speed") {
+    const activeExtra = Math.max(0, (st.extra || 0) - (p.levelSpeedHold || 0));
+    if (activeExtra) bits.push("4-й +" + activeExtra);
+  } else if (st.extra) bits.push("4-й +" + st.extra);
   if (st.mod[key]) bits.push("вещи " + (st.mod[key] > 0 ? "+" : "") + st.mod[key]);
   if (key === "melee" && p.rewardMelee) bits.push("задания +" + p.rewardMelee);
   if (key === "speed" && p.rewardSpeed) bits.push("задания +" + p.rewardSpeed);
+  if (key === "speed" && p.levelSpeedHold) bits.push("уровень со следующего хода +" + p.levelSpeedHold);
+  if (key === "speed" && p.pendingRewardSpeed) bits.push("задание со следующего хода +" + p.pendingRewardSpeed);
   if (st.escort && num(st.escort[key])) bits.push("сопровождение " + (num(st.escort[key]) > 0 ? "+" : "") + num(st.escort[key]));
   return bits.join(" · ");
 }
@@ -1194,7 +1209,7 @@ function rewardHtml() {
   if (!state.reward || !state.game) return "";
   const r = state.reward;
   const step = (key, label) => `<div class="spread"><span>${label}</span><div class="stepper"><button type="button" data-act="reward" data-key="${key}" data-delta="-1">−</button><b>${r[key] || 0}</b><button type="button" data-act="reward" data-key="${key}" data-delta="1">+</button></div></div>`;
-  return `<div class="modal reward"><div class="stack"><h2>Награда задания</h2><p class="note">Что герой получил за задание. Ноль — ничего не прибавлять. Ближний бой и скорость остаются на герое, скорость сразу добавляет действия. Уровень прибавится, когда закроете форму, если ползунок выключен.</p>${step("health", "Здоровье")}${step("peril", "Риск")}${step("glory", "Слава")}${step("melee", "Ближний бой")}${step("speed", "Скорость")}<div class="spread"><span>Без прибавления уровня</span><button type="button" class="switch ${r.noLevel ? "on" : ""}" data-act="reward-level" aria-pressed="${r.noLevel ? "true" : "false"}" aria-label="Без прибавления уровня"><span></span></button></div><button type="button" class="btn gold block" data-act="apply-reward">Применить</button><button type="button" class="btn ghost block" data-act="skip-reward">Без награды</button></div></div>`;
+  return `<div class="modal reward"><div class="stack"><h2>Награда задания</h2><p class="note">Что герой получил за задание. Ноль — ничего не прибавлять. Ближний бой остаётся сразу. Скорость за задание встанет со следующего хода. Уровень прибавится, когда закроете форму, если ползунок выключен.</p>${step("health", "Здоровье")}${step("peril", "Риск")}${step("glory", "Слава")}${step("melee", "Ближний бой")}${step("speed", "Скорость")}<div class="spread"><span>Без прибавления уровня</span><button type="button" class="switch ${r.noLevel ? "on" : ""}" data-act="reward-level" aria-pressed="${r.noLevel ? "true" : "false"}" aria-label="Без прибавления уровня"><span></span></button></div><button type="button" class="btn gold block" data-act="apply-reward">Применить</button><button type="button" class="btn ghost block" data-act="skip-reward">Без награды</button></div></div>`;
 }
 function menuHtml() {
   if (!state.menu) return "";
@@ -1581,7 +1596,7 @@ const actions = {
     state.reward = null;
     if (!p) { render(); return; }
     if (r && r.noLevel) commit(() => { p.questsWithoutLevel = (p.questsWithoutLevel || 0) + 1; });
-    else commit(() => { const info = changeLevel(p, 1); flash(info === null ? "Уровень уже максимальный" : "Уровень " + p.level); });
+    else commit(() => { const info = changeLevel(p, 1); flash(info === null ? "Уровень уже максимальный" : "Уровень " + p.level + (info ? ". " + info : "")); });
   },
   "apply-reward"() {
     const r = state.reward || { health: 0, peril: 0, glory: 0, melee: 0, speed: 0, noLevel: false };
@@ -1598,11 +1613,14 @@ const actions = {
         p.peril = Math.max(0, p.peril + (r.peril || 0));
         p.glory = Math.max(0, p.glory + (r.glory || 0));
         p.rewardMelee = Math.max(0, (p.rewardMelee || 0) + (r.melee || 0));
-        p.rewardSpeed = Math.max(0, (p.rewardSpeed || 0) + (r.speed || 0));
-        if (r.speed) shiftAp(p, r.speed);
+        if (r.speed) p.pendingRewardSpeed = (p.pendingRewardSpeed || 0) + r.speed;
       }
     });
-    if ((r.health || 0) > room) flash("Здоровье упёрлось в максимум. Поднимите максимум, если награда больше.");
+    const notes = [];
+    if ((r.health || 0) > room) notes.push("Здоровье упёрлось в максимум. Поднимите максимум, если награда больше.");
+    if (r.speed) notes.push("Скорость +" + r.speed + " со следующего хода");
+    if (!r.noLevel && p.levelSpeedHold) notes.push("Скорость уровня — со следующего хода");
+    if (notes.length) flash(notes.join(". "));
   },
   "fight-count"(btn) { setFightCount((state.game.fights || []).length + Number(btn.dataset.delta)); },
   "fight-stat"(btn) {
