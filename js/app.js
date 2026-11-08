@@ -80,6 +80,7 @@ function startingDecks(s) {
   return { surface: Math.max(0, totals.surface - 5), dungeon: totals.dungeon };
 }
 function planeLabel(id) { return id === "dungeon" ? "Подземелье" : "Поверхность"; }
+function heroPlane(p) { return p && p.lastPlane === "dungeon" ? "dungeon" : "surface"; }
 function ensureDecks(g) {
   if (!g.decks) {
     const left = Number(g.locationsLeft);
@@ -742,6 +743,7 @@ function nextPhase() {
   const ids = PHASES.map((x) => x[0]);
   const i = ids.indexOf(state.game.phase);
   if (i >= 0 && i < ids.length - 1) state.game.phase = ids[i + 1];
+  if (state.game.phase === "location") state.game.plane = heroPlane(current());
   state.game.prompt = null;
 }
 function endTurn() {
@@ -993,7 +995,8 @@ function phaseBody() {
   if (g.phase === "villainy") return villainyBody();
   if (g.phase === "location") {
     const left = g.decks[g.plane];
-    return `<p class="note">Откройте одну локацию из той колоды, где сейчас стоит герой. Слава и риск с карты придут, когда он в неё войдёт.</p>${planeToggle()}${left ? `<p class="note">Спишется 1 карта: ${planeLabel(g.plane).toLowerCase()}.</p>` : `<p class="note">Эта колода пуста. Переключите ползунок или пропустите фазу.</p>`}<p>Поправить «${planeLabel(g.plane)}»</p>${stepper(left, "deck")}`;
+    const remembered = p.lastPlane === "dungeon" || p.lastPlane === "surface" ? `В прошлый раз этот герой открывал ${planeLabel(p.lastPlane).toLowerCase()}.` : "Этот герой ещё не открывал локацию, поэтому отмечена поверхность.";
+    return `<p class="note">Откройте одну локацию из той колоды, где сейчас стоит герой. Слава и риск с карты придут, когда он в неё войдёт. ${remembered}</p>${planeToggle()}${left ? `<p class="note">Спишется 1 карта: ${planeLabel(g.plane).toLowerCase()}.</p>` : `<p class="note">Эта колода пуста. Переключите ползунок или пропустите фазу.</p>`}<p>Поправить «${planeLabel(g.plane)}»</p>${stepper(left, "deck")}`;
   }
   if (g.phase === "deeds") return deedsBody();
   return discardBody();
@@ -1037,6 +1040,25 @@ function dropTurnCards(p) {
 function statButtons(act, extra, current) {
   return [["melee", "Ближний бой"], ["magic", "Магия"], ["speed", "Скорость"]].map(([id, name]) => `<button type="button" class="tiny ${current === id ? "gold" : ""}" data-act="${act}" data-stat="${id}" ${extra}>${name}</button>`).join("");
 }
+function applyMonsterWound(f, foe) {
+  const before = foe.health;
+  foe.health = Math.max(0, foe.health - 1);
+  f.wound = true;
+  f.woundHealth = before - foe.health;
+  f.woundHeroId = foe.id;
+}
+function clearMonsterWound(f) {
+  if (f.woundHeroId) {
+    const who = byId(f.woundHeroId);
+    if (who && f.woundHealth) who.health = Math.min(who.healthMax, who.health + f.woundHealth);
+  } else if (f.wound) {
+    const who = byId(f.foeId);
+    if (who) who.peril = Math.max(0, who.peril - 1);
+  }
+  f.wound = false;
+  f.woundHealth = 0;
+  f.woundHeroId = "";
+}
 function blankFight() {
   const foes = fightPool();
   const foe = foes[0] || livingFoes()[0];
@@ -1056,12 +1078,16 @@ function setFightCount(n) {
   const g = state.game;
   g.fights = Array.isArray(g.fights) ? g.fights : [];
   n = clamp(n, 0, 8);
-  while (g.fights.length < n) g.fights.push(blankFight());
-  g.fights.length = n;
-  g.counterSeen = false;
-  state.counter = null;
-  saveGame();
-  render();
+  const dropping = g.fights.slice(n).some((f) => f.wound);
+  const apply = () => {
+    g.fights.slice(n).forEach((f) => { if (f.wound) clearMonsterWound(f); });
+    while (g.fights.length < n) g.fights.push(blankFight());
+    g.fights.length = n;
+    g.counterSeen = false;
+    state.counter = null;
+  };
+  if (dropping) commit(apply);
+  else { apply(); saveGame(); render(); }
 }
 function counterFoes() {
   return livingFoes().filter((p) => p.savedAp > 0);
@@ -1103,7 +1129,7 @@ function fightHtml() {
     const speedGlory = stat === "speed"
       ? `<div class="spread"><span>Слава за успех</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="glory" data-delta="-1">−</button><b>${f.glory || 0}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="glory" data-delta="1">+</button></div></div><button type="button" class="btn ${f.gloryTaken ? "" : "gold"}" data-act="fight-success" data-i="${i}">${f.gloryTaken ? "Слава уже взята — отменить" : "Успех — слава +" + (f.glory || 0)}</button>`
       : "";
-    return `<article class="fight"><h3>Бой ${i + 1}</h3>${picks}<p class="muted">Статы того, кого атакуют</p>${statBrief(foe)}<div class="row">${statButtons("fight-stat", `data-i="${i}"`, stat)}</div><div class="spread"><span>У меня</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="-1">−</button><b>${f.mine}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="1">+</button></div></div><div class="spread"><span>У соперника</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="-1">−</button><b>${f.theirs}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="1">+</button></div></div><p class="compare">${compareLine(Number(f.mine) || 0, Number(f.theirs) || 0)}</p>${speedGlory}<div class="row"><button type="button" class="btn ${f.wound ? "gold" : ""}" data-act="fight-wound" data-i="${i}">${f.wound ? "Рана уже есть — снять риск" : "Рана — +1 риск"}</button><button type="button" class="btn ${f.miss ? "gold" : ""}" data-act="fight-miss" data-i="${i}">${f.miss ? "Неудача отмечена" : "Неудача"}</button></div>${effectsBlock("Ваши эффекты по " + statName, effectsFor(me, stat))}${effectsBlock("Эффекты соперника по " + statName, effectsFor(foe, stat))}</article>`;
+    return `<article class="fight"><h3>Бой ${i + 1}</h3>${picks}<p class="muted">Статы того, кого атакуют</p>${statBrief(foe)}<div class="row">${statButtons("fight-stat", `data-i="${i}"`, stat)}</div><div class="spread"><span>У меня</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="-1">−</button><b>${f.mine}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="mine" data-delta="1">+</button></div></div><div class="spread"><span>У соперника</span><div class="stepper"><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="-1">−</button><b>${f.theirs}</b><button type="button" data-act="fight-mod" data-i="${i}" data-key="theirs" data-delta="1">+</button></div></div><p class="compare">${compareLine(Number(f.mine) || 0, Number(f.theirs) || 0)}</p><p class="muted">Жизнь <b>${foe.health}</b> из ${foe.healthMax}</p>${speedGlory}<div class="row"><button type="button" class="btn ${f.wound ? "gold" : ""}" data-act="fight-wound" data-i="${i}">${f.wound ? "Рана уже есть — вернуть жизнь" : "Рана — −1 жизнь"}</button><button type="button" class="btn ${f.miss ? "gold" : ""}" data-act="fight-miss" data-i="${i}">${f.miss ? "Неудача отмечена" : "Неудача"}</button></div>${effectsBlock("Ваши эффекты по " + statName, effectsFor(me, stat))}${effectsBlock("Эффекты соперника по " + statName, effectsFor(foe, stat))}</article>`;
   }).join("");
   const played = g.fights.length ? `<button type="button" class="btn gold block" data-act="cards-played">Карты злодеяний отыграны</button><p class="note">После этого, если у соперника сохранено действие, откроется контратака.</p>` : "";
   return `<div class="stack"><h3>Карты злодеяний</h3>${stepper(g.fights.length, "fight-count")}<p class="note">Сколько карт разыгрываете. По каждой — своё сравнение: выберите характеристику и поправьте числа после кубиков.</p>${rows}${played}</div>`;
@@ -1473,7 +1499,7 @@ const actions = {
     }
     commit(() => {
       if (phase === "recovery") applyRecovery();
-      else if (phase === "location") { drawLocation(state.game); nextPhase(); }
+      else if (phase === "location") { current().lastPlane = state.game.plane === "dungeon" ? "dungeon" : "surface"; drawLocation(state.game); nextPhase(); }
       else if (phase === "discard") endTurn();
       else nextPhase();
     });
@@ -1512,14 +1538,24 @@ const actions = {
     render();
   },
   "pick-target"(btn) {
-    state.game.targetId = btn.dataset.id;
-    const foe = byId(btn.dataset.id);
-    (state.game.fights || []).forEach((f) => {
-      f.foeId = btn.dataset.id;
-      if (foe) f.theirs = statsOf(foe)[statKey(f.stat)];
-    });
-    saveGame();
-    render();
+    const g = state.game;
+    const nextId = btn.dataset.id;
+    if (g.targetId === nextId) return;
+    const foe = byId(nextId);
+    const wounded = (g.fights || []).some((f) => f.wound);
+    const apply = () => {
+      g.targetId = nextId;
+      (g.fights || []).forEach((f) => {
+        if (f.wound && (f.woundHeroId || f.foeId) !== nextId) {
+          clearMonsterWound(f);
+          if (foe) applyMonsterWound(f, foe);
+        }
+        f.foeId = nextId;
+        if (foe) f.theirs = statsOf(foe)[statKey(f.stat)];
+      });
+    };
+    if (wounded) commit(apply);
+    else { apply(); saveGame(); render(); }
   },
   "grant-peril"(btn) { commit(() => { byId(btn.dataset.id).peril += 1; }); },
   "grant-glory"() { commit(() => { current().glory += 1; }); },
@@ -1658,12 +1694,18 @@ const actions = {
   },
   "fight-foe"(btn) {
     const f = (state.game.fights || [])[Number(btn.dataset.i)];
-    if (!f) return;
-    f.foeId = btn.dataset.id;
-    const foe = byId(f.foeId);
-    if (foe) f.theirs = statsOf(foe)[statKey(f.stat)];
-    saveGame();
-    render();
+    if (!f || f.foeId === btn.dataset.id) return;
+    const foe = byId(btn.dataset.id);
+    const apply = () => {
+      if (f.wound && (f.woundHeroId || f.foeId) !== btn.dataset.id) {
+        clearMonsterWound(f);
+        if (foe) applyMonsterWound(f, foe);
+      }
+      f.foeId = btn.dataset.id;
+      if (foe) f.theirs = statsOf(foe)[statKey(f.stat)];
+    };
+    if (f.wound) commit(apply);
+    else { apply(); saveGame(); render(); }
   },
   "fight-mod"(btn) {
     const f = (state.game.fights || [])[Number(btn.dataset.i)];
@@ -1678,10 +1720,10 @@ const actions = {
     const foe = f && byId(f.foeId);
     if (!f || !foe) return;
     commit(() => {
-      if (f.wound) { foe.peril = Math.max(0, foe.peril - 1); f.wound = false; }
-      else { foe.peril += 1; f.wound = true; }
+      if (f.wound) clearMonsterWound(f);
+      else applyMonsterWound(f, foe);
     });
-    flash(f.wound ? foe.heroName + ": риск +1 за рану" : "Риск за рану снят");
+    flash(f.wound ? (f.woundHealth ? foe.heroName + ": жизнь −" + f.woundHealth : foe.heroName + ": жизнь уже 0") : "Жизнь за рану возвращена");
   },
   "fight-miss"(btn) {
     const f = (state.game.fights || [])[Number(btn.dataset.i)];
